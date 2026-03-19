@@ -15,8 +15,19 @@ class NormalizedQuery:
 
 
 @dataclass(slots=True)
+class LookupStatus:
+    found_in_identification: bool
+    reference_rows_found: int
+    packaging_rows_found: int
+    freight_rows_found: int
+    cage_rows_found: int
+
+
+@dataclass(slots=True)
 class LookupResult:
+    query_id: str
     query: dict[str, Any]
+    status: LookupStatus
     identification: dict[str, Any] | None
     part_numbers: list[dict[str, Any]] = field(default_factory=list)
     manufacturers: list[dict[str, Any]] = field(default_factory=list)
@@ -28,7 +39,15 @@ class LookupResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "query_id": self.query_id,
             "query": self.query,
+            "status": {
+                "found_in_identification": self.status.found_in_identification,
+                "reference_rows_found": self.status.reference_rows_found,
+                "packaging_rows_found": self.status.packaging_rows_found,
+                "freight_rows_found": self.status.freight_rows_found,
+                "cage_rows_found": self.status.cage_rows_found,
+            },
             "identification": self.identification,
             "part_numbers": self.part_numbers,
             "manufacturers": self.manufacturers,
