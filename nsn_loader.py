@@ -7,7 +7,7 @@ from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
-DATA_DIRS = ["CAGE", "IDENTIFICATION", "REFERENCE", "FREIGHT_PACKAGING"]
+DATA_DIRS = ["CAGE", "IDENTIFICATION", "REFERENCE", "FREIGHT_PACKAGING", "CHARACTERISTICS"]
 ENCODINGS = ["utf-8", "utf-8-sig", "cp1252", "latin-1"]
 
 

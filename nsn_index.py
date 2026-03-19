@@ -117,6 +117,7 @@ class NsnIndexBuilder:
             "reference__",
             "cage__",
             "freight_packaging__",
+            "characteristics__",
         )
         tables = con.execute(
             """
