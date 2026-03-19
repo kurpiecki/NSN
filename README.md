@@ -16,7 +16,8 @@ Lokalna aplikacja (offline) do wyszukiwania informacji o NSN/NIIN na podstawie r
   - listę kwalifikujących się PN/CAGE,
   - profile packaging dla NIIN/NSN,
   - dane freight/transport,
-  - ostrzeżenia i raw/debug.
+  - ostrzeżenia i raw/debug,
+- ma panel kontrolny UI z krótkimi logami i heartbeat co 30 sekund.
 
 ## Ograniczenia interpretacyjne (ważne)
 
@@ -34,6 +35,20 @@ Wymagania: Python 3.11+
 python -m venv .venv
 . .venv/Scripts/activate   # Windows PowerShell: .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+```
+
+## Szybki start (UI)
+
+Jeśli uruchomisz bez argumentów, program automatycznie otworzy interfejs Streamlit:
+
+```bash
+python app.py
+```
+
+Równoważnie:
+
+```bash
+python app.py --ui
 ```
 
 ## Budowa indeksu
@@ -62,21 +77,25 @@ Eksport do JSON:
 python app.py 8030010316840 --db-path data/nsn.duckdb --out-json out/result.json
 ```
 
-## Streamlit UI
+## Streamlit UI (tryb ręczny)
 
 ```bash
 streamlit run streamlit_app.py
 ```
 
-UI:
-- pole wejścia NSN/NIIN + przycisk „Szukaj”,
+UI zawiera:
+- przycisk `Start` (włącza auto-refresh co 30 s),
+- przycisk `Stop` (zatrzymuje auto-refresh),
+- status monitora i ostatni heartbeat,
+- krótkie logi działania (budowa indeksu, lookup, błędy, heartbeat),
+- pole NSN/NIIN + przycisk `Szukaj`,
 - sekcje: podsumowanie, PN/producenci, packaging, freight, raw/debug,
 - eksport: JSON + CSV.
 
 ## Architektura
 
-- `app.py` – CLI + funkcje programistyczne `build_local_index()` i `lookup_nsn()`.
-- `streamlit_app.py` – lokalny interfejs testowy.
+- `app.py` – CLI + funkcje programistyczne `build_local_index()` i `lookup_nsn()` + launcher UI.
+- `streamlit_app.py` – lokalny interfejs testowy + panel kontrolny (start/stop, logi, heartbeat).
 - `nsn_loader.py` – wykrywanie plików i nagłówków, encodings/delimitery.
 - `nsn_index.py` – budowa indeksu DuckDB i widoków logicznych.
 - `nsn_lookup.py` – logika lookup i składanie wyniku użytkowego.
@@ -92,7 +111,7 @@ UI:
   - `v_packaging` (profile opakowania),
   - `v_freight` (transport/freight).
 
-Klucz wyszukiwania: **NIIN** (9 cyfr). 
+Klucz wyszukiwania: **NIIN** (9 cyfr).
 
 - NSN wejściowy normalizuje się do FSC + NIIN,
 - rekordy są wiązane defensywnie po wykrytym NIIN,
@@ -111,4 +130,3 @@ Klucz wyszukiwania: **NIIN** (9 cyfr).
 - `get_freight_rows(niin)`
 - `build_user_friendly_result(...)`
 - `export_result_to_json(...)`
-

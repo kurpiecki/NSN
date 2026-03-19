@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 from nsn_index import NsnIndexBuilder
@@ -19,6 +21,11 @@ def lookup_nsn(nsn_or_niin: str, db_path: str = "data/nsn.duckdb") -> dict:
     return service.lookup_nsn(nsn_or_niin)
 
 
+def launch_ui() -> int:
+    cmd = [sys.executable, "-m", "streamlit", "run", "streamlit_app.py"]
+    return subprocess.call(cmd)
+
+
 def main() -> None:
     setup_logging()
     parser = argparse.ArgumentParser(description="Lokalna wyszukiwarka NSN (PUB LOG)")
@@ -28,8 +35,12 @@ def main() -> None:
     parser.add_argument("--build-index", action="store_true", help="Buduj indeks")
     parser.add_argument("--rebuild", action="store_true", help="Usuń i zbuduj indeks od nowa")
     parser.add_argument("--out-json", help="Eksport wyniku do JSON")
+    parser.add_argument("--ui", action="store_true", help="Uruchom lokalny interfejs Streamlit")
 
     args = parser.parse_args()
+
+    if args.ui or (not args.query and not args.build_index):
+        raise SystemExit(launch_ui())
 
     if args.build_index:
         loaded = build_local_index(base_dir=args.base_dir, db_path=args.db_path, rebuild=args.rebuild)
