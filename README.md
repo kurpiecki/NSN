@@ -132,6 +132,14 @@ W tej wersji lookup czyta **bezpośrednio z tabel z prefiksami**:
 
 To eliminuje problem z brakiem widoków typu `v_identification`, jeśli baza była budowana częściowo albo na innej wersji DuckDB.
 
+Lookup preferuje konkretne pliki domenowe, jeżeli są dostępne:
+- `IDENTIFICATION__P_FLIS_NSN` (po FSC+NIIN),
+- `IDENTIFICATION__V_FLIS_IDENTIFICATION` (po NIIN),
+- `REFERENCE__V_FLIS_PART` (po NIIN),
+- `CAGE__P_CAGE` + `CAGE__V_CAGE_ADDRESS` + `CAGE__V_CAGE_STATUS_AND_TYPE` (po CAGE_CODE),
+- `FREIGHT_PACKAGING__V_FLIS_PACKAGING_1/2/3` (po NIIN + PICA_SICA),
+- `FREIGHT_PACKAGING__V_FREIGHT` + `FREIGHT_PACKAGING__V_DSS_WEIGHT_AND_CUBE` (po NIIN).
+
 ## Funkcje API
 
 - `normalize_nsn(input_str)`
