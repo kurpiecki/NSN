@@ -45,10 +45,42 @@ class NsnLookupService:
         out["__niin_guess"] = joined.str.extract(r"(\d{9})", expand=False)
         return out
 
-    def get_identification(self, niin: str) -> dict[str, Any] | None:
+    def _get_domain_df(
+        self,
+        prefix: str,
+        include_substring: str | None = None,
+        exclude_substring: str | None = None,
+    ) -> pd.DataFrame:
         con = self._connect()
-        df = con.execute("SELECT * FROM v_identification").fetchdf()
+        table_rows = con.execute(
+            """
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'main'
+              AND table_type = 'BASE TABLE'
+              AND table_name LIKE ?
+            ORDER BY table_name
+            """,
+            [f"{prefix}%"],
+        ).fetchall()
+
+        frames: list[pd.DataFrame] = []
+        for (table_name,) in table_rows:
+            if include_substring and include_substring not in table_name:
+                continue
+            if exclude_substring and exclude_substring in table_name:
+                continue
+            df = con.execute(f"SELECT * FROM {table_name}").fetchdf()
+            if not df.empty:
+                df.insert(0, "table_name", table_name)
+                frames.append(df)
         con.close()
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True, sort=False)
+
+    def get_identification(self, niin: str) -> dict[str, Any] | None:
+        df = self._get_domain_df("identification__")
         df = self._with_niin(df)
         hit = df[df["__niin_guess"] == niin]
         if hit.empty:
@@ -56,25 +88,19 @@ class NsnLookupService:
         return hit.iloc[0].dropna().to_dict()
 
     def get_reference_rows(self, niin: str) -> list[dict[str, Any]]:
-        con = self._connect()
-        df = con.execute("SELECT * FROM v_reference").fetchdf()
-        con.close()
+        df = self._get_domain_df("reference__")
         df = self._with_niin(df)
         hit = df[df["__niin_guess"] == niin]
         return hit.fillna("").to_dict(orient="records")
 
     def get_packaging_rows(self, niin: str) -> list[dict[str, Any]]:
-        con = self._connect()
-        df = con.execute("SELECT * FROM v_packaging").fetchdf()
-        con.close()
+        df = self._get_domain_df("freight_packaging__", exclude_substring="freight")
         df = self._with_niin(df)
         hit = df[df["__niin_guess"] == niin]
         return hit.fillna("").to_dict(orient="records")
 
     def get_freight_rows(self, niin: str) -> list[dict[str, Any]]:
-        con = self._connect()
-        df = con.execute("SELECT * FROM v_freight").fetchdf()
-        con.close()
+        df = self._get_domain_df("freight_packaging__", include_substring="freight")
         df = self._with_niin(df)
         hit = df[df["__niin_guess"] == niin]
         return hit.fillna("").to_dict(orient="records")
@@ -82,9 +108,7 @@ class NsnLookupService:
     def get_cage_details(self, cage_codes: set[str]) -> list[dict[str, Any]]:
         if not cage_codes:
             return []
-        con = self._connect()
-        df = con.execute("SELECT * FROM v_cage").fetchdf()
-        con.close()
+        df = self._get_domain_df("cage__")
         if df.empty:
             return []
         code_col = self._pick_column(df, ["cage", "cage_code", "cagecd"])

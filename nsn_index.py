@@ -74,8 +74,7 @@ class NsnIndexBuilder:
         loaded_counts: dict[str, int] = {}
 
         if rebuild:
-            con.execute("DROP SCHEMA main CASCADE")
-            con.execute("CREATE SCHEMA main")
+            self._drop_managed_objects(con)
             self._ensure_meta_table(con)
 
         for folder, files in discovered.items():
@@ -86,7 +85,7 @@ class NsnIndexBuilder:
 
             specs = scan_columns(files)
             loaded_counts[folder] = 0
-            for idx, spec in enumerate(specs, start=1):
+            for spec in specs:
                 fp = Path(spec["file"])
                 table_name = f"{folder.lower()}__{fp.stem.lower()}"
                 con.execute(f"DROP TABLE IF EXISTS {table_name}")
@@ -112,77 +111,30 @@ class NsnIndexBuilder:
         con.close()
         return loaded_counts
 
-    def _create_normalized_views(self, con: duckdb.DuckDBPyConnection) -> None:
-        con.execute("DROP VIEW IF EXISTS v_identification")
-        con.execute("DROP VIEW IF EXISTS v_reference")
-        con.execute("DROP VIEW IF EXISTS v_cage")
-        con.execute("DROP VIEW IF EXISTS v_packaging")
-        con.execute("DROP VIEW IF EXISTS v_freight")
+    def _drop_managed_objects(self, con: duckdb.DuckDBPyConnection) -> None:
+        managed_prefixes = (
+            "identification__",
+            "reference__",
+            "cage__",
+            "freight_packaging__",
+        )
+        tables = con.execute(
+            """
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'main'
+              AND table_type = 'BASE TABLE'
+            """
+        ).fetchall()
+        for (table_name,) in tables:
+            if table_name == "source_files_meta" or table_name.startswith(managed_prefixes):
+                con.execute(f"DROP TABLE IF EXISTS {table_name}")
 
-        con.execute(
-            """
-            CREATE VIEW v_identification AS
-            SELECT table_name, *
-            FROM (
-                SELECT table_name
-                FROM information_schema.tables
-                WHERE table_schema='main'
-                  AND table_name LIKE 'identification__%'
-            ) t
-            JOIN LATERAL (SELECT * FROM query_table(t.table_name)) q ON TRUE
-            """
-        )
-        con.execute(
-            """
-            CREATE VIEW v_reference AS
-            SELECT table_name, *
-            FROM (
-                SELECT table_name
-                FROM information_schema.tables
-                WHERE table_schema='main'
-                  AND table_name LIKE 'reference__%'
-            ) t
-            JOIN LATERAL (SELECT * FROM query_table(t.table_name)) q ON TRUE
-            """
-        )
-        con.execute(
-            """
-            CREATE VIEW v_cage AS
-            SELECT table_name, *
-            FROM (
-                SELECT table_name
-                FROM information_schema.tables
-                WHERE table_schema='main'
-                  AND table_name LIKE 'cage__%'
-            ) t
-            JOIN LATERAL (SELECT * FROM query_table(t.table_name)) q ON TRUE
-            """
-        )
-        con.execute(
-            """
-            CREATE VIEW v_packaging AS
-            SELECT table_name, *
-            FROM (
-                SELECT table_name
-                FROM information_schema.tables
-                WHERE table_schema='main'
-                  AND table_name LIKE 'freight_packaging__%'
-                  AND table_name NOT LIKE '%freight%'
-            ) t
-            JOIN LATERAL (SELECT * FROM query_table(t.table_name)) q ON TRUE
-            """
-        )
-        con.execute(
-            """
-            CREATE VIEW v_freight AS
-            SELECT table_name, *
-            FROM (
-                SELECT table_name
-                FROM information_schema.tables
-                WHERE table_schema='main'
-                  AND table_name LIKE 'freight_packaging__%'
-                  AND table_name LIKE '%freight%'
-            ) t
-            JOIN LATERAL (SELECT * FROM query_table(t.table_name)) q ON TRUE
-            """
-        )
+        for view_name in ["v_identification", "v_reference", "v_cage", "v_packaging", "v_freight"]:
+            con.execute(f"DROP VIEW IF EXISTS {view_name}")
+
+    def _create_normalized_views(self, con: duckdb.DuckDBPyConnection) -> None:
+        # Widoki są opcjonalne; lookup działa bezpośrednio na tabelach bazowych.
+        # Tworzymy je tylko wtedy, gdy da się zbudować bezpieczne UNION ALL.
+        for view_name in ["v_identification", "v_reference", "v_cage", "v_packaging", "v_freight"]:
+            con.execute(f"DROP VIEW IF EXISTS {view_name}")

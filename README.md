@@ -104,12 +104,10 @@ UI zawiera:
 
 ## Jakie pliki/tabele są używane i jak łączone
 
-- `IDENTIFICATION/*` -> widok `v_identification` (rekord bazowy NSN/NIIN),
-- `REFERENCE/*` -> widok `v_reference` (PN/CAGE i kody referencyjne),
-- `CAGE/*` -> widok `v_cage` (dane producenta po kodzie CAGE),
-- `FREIGHT_PACKAGING/*` -> widoki:
-  - `v_packaging` (profile opakowania),
-  - `v_freight` (transport/freight).
+- `IDENTIFICATION/*` -> tabele `identification__*` (rekord bazowy NSN/NIIN),
+- `REFERENCE/*` -> tabele `reference__*` (PN/CAGE i kody referencyjne),
+- `CAGE/*` -> tabele `cage__*` (dane producenta po kodzie CAGE),
+- `FREIGHT_PACKAGING/*` -> tabele `freight_packaging__*` (packaging i freight, rozdzielane po nazwie tabeli).
 
 Klucz wyszukiwania: **NIIN** (9 cyfr).
 
@@ -117,6 +115,22 @@ Klucz wyszukiwania: **NIIN** (9 cyfr).
 - rekordy są wiązane defensywnie po wykrytym NIIN,
 - CAGE mapowany do danych producenta po kodzie CAGE,
 - packaging i freight raportowane jako dane dla NIIN/NSN (bez wymuszania mapowania do konkretnego PN).
+
+## Struktura PUB LOG (DLA) i diagnostyka
+
+Na podstawie dokumentu cross-reference DLA, typowe pliki dla Twojego scenariusza to m.in.:
+- `Identification.zip`: `V_FLIS_IDENTIFICATION`, `V_FLIS_STANDARDIZATION`, `V_FLIS_CANCELLED_NIIN`,
+- `REFERENCE`: `V_FLIS_PART`,
+- `Freight_Packaging.zip`: `V_FREIGHT`, `V_FLIS_PACKAGING_1/2/3`,
+- `CAGE.zip`: `V_CAGE_ADDRESS`, `V_CAGE_STATUS_AND_TYPE`.
+
+W tej wersji lookup czyta **bezpośrednio z tabel z prefiksami**:
+- `identification__*`
+- `reference__*`
+- `cage__*`
+- `freight_packaging__*`
+
+To eliminuje problem z brakiem widoków typu `v_identification`, jeśli baza była budowana częściowo albo na innej wersji DuckDB.
 
 ## Funkcje API
 
