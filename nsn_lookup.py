@@ -17,6 +17,27 @@ logger = logging.getLogger(__name__)
 class NsnLookupService:
     def __init__(self, db_path: str | Path = "data/nsn.duckdb") -> None:
         self.db_path = Path(db_path)
+        self.log_dir = Path("logs")
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.trace_logger = self._build_file_logger("nsn_trace", self.log_dir / "search_trace.log")
+        self.error_logger = self._build_file_logger("nsn_error", self.log_dir / "errors.log")
+
+    @staticmethod
+    def _build_file_logger(name: str, path: Path) -> logging.Logger:
+        log = logging.getLogger(name)
+        if not any(isinstance(h, logging.FileHandler) and Path(getattr(h, "baseFilename", "")) == path.resolve() for h in log.handlers):
+            handler = logging.FileHandler(path, encoding="utf-8")
+            handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+            log.addHandler(handler)
+            log.setLevel(logging.INFO)
+            log.propagate = False
+        return log
+
+    def _trace(self, message: str) -> None:
+        self.trace_logger.info(message)
+
+    def _error(self, message: str) -> None:
+        self.error_logger.error(message)
 
     def _connect(self) -> duckdb.DuckDBPyConnection:
         if not self.db_path.exists():
@@ -55,12 +76,14 @@ class NsnLookupService:
             """
         ).fetchall()
         con.close()
+        self._trace(f"Detected tables ({len(rows)}): {[r[0] for r in rows]}")
         return [r[0] for r in rows]
 
     def _table_df(self, table_name: str) -> pd.DataFrame:
         con = self._connect()
         df = con.execute(f"SELECT * FROM {table_name}").fetchdf()
         con.close()
+        self._trace(f"Read table {table_name}: rows={len(df)}, cols={len(df.columns)}")
         if not df.empty:
             df.insert(0, "table_name", table_name)
         return df
@@ -71,19 +94,26 @@ class NsnLookupService:
             p_up = p.upper()
             for t in tables:
                 if p_up in t.upper():
+                    self._trace(f"Table match for pattern '{p}': {t}")
                     return t
+        self._trace(f"No table matched patterns: {patterns}")
         return None
 
     def _filter_by_niin(self, df: pd.DataFrame, niin: str) -> pd.DataFrame:
         if df.empty:
+            self._trace(f"Filter NIIN={niin}: input dataframe empty")
             return df
         niin_col = self._pick_column(df, ["NIIN"])
         if niin_col:
-            return df[self._clean_codes(df[niin_col]) == niin]
+            out = df[self._clean_codes(df[niin_col]) == niin]
+            self._trace(f"Filter NIIN={niin} by column {niin_col}: matched={len(out)}")
+            return out
         # fallback defensywny
         joined = df.astype(str).agg("|".join, axis=1)
         mask = joined.str.contains(rf"\b{niin}\b", regex=True, na=False)
-        return df[mask]
+        out = df[mask]
+        self._trace(f"Filter NIIN={niin} by regex fallback: matched={len(out)}")
+        return out
 
     def get_identification(self, niin: str, fsc: str | None = None) -> dict[str, Any] | None:
         p_nsn_tbl = self._find_table(["IDENTIFICATION__P_FLIS_NSN"])
@@ -106,6 +136,7 @@ class NsnLookupService:
             ext = self._filter_by_niin(ext_df, niin)
 
         if base.empty and ext.empty:
+            self._trace(f"Identification: no records for NIIN={niin}, FSC={fsc}")
             return None
 
         result: dict[str, Any] = {}
@@ -115,6 +146,7 @@ class NsnLookupService:
             for k, v in ext.iloc[0].dropna().to_dict().items():
                 if k not in result or not str(result.get(k, "")).strip():
                     result[k] = v
+        self._trace(f"Identification found for NIIN={niin}: fields={len(result)}")
         return result
 
     def get_reference_rows(self, niin: str) -> list[dict[str, Any]]:
@@ -122,6 +154,7 @@ class NsnLookupService:
         if not tbl:
             return []
         df = self._filter_by_niin(self._table_df(tbl), niin)
+        self._trace(f"Reference rows for NIIN={niin}: {len(df)}")
         return df.fillna("").to_dict(orient="records")
 
     def get_cage_details(self, cage_codes: set[str]) -> list[dict[str, Any]]:
@@ -135,6 +168,7 @@ class NsnLookupService:
                 tables.append(t)
 
         if not tables:
+            self._trace("CAGE lookup skipped: no cage tables found")
             return []
 
         frames = []
@@ -148,6 +182,7 @@ class NsnLookupService:
                 frames.append(hit)
 
         if not frames:
+            self._trace(f"CAGE lookup for codes={sorted(cage_codes)}: 0 rows")
             return []
 
         merged = pd.concat(frames, ignore_index=True, sort=False).fillna("")
@@ -163,6 +198,7 @@ class NsnLookupService:
                     if str(v).strip() and (k not in row or not str(row[k]).strip()):
                         row[k] = v
             output.append(row)
+        self._trace(f"CAGE merged rows: {len(output)}")
         return output
 
     def get_packaging_rows(self, niin: str) -> list[dict[str, Any]]:
@@ -175,6 +211,7 @@ class NsnLookupService:
         p3 = self._filter_by_niin(self._table_df(p3_tbl), niin) if p3_tbl else pd.DataFrame()
 
         if p1.empty and p2.empty and p3.empty:
+            self._trace(f"Packaging rows for NIIN={niin}: 0")
             return []
 
         # Łączenie po NIIN + PICA_SICA, gdy dostępne.
@@ -204,6 +241,7 @@ class NsnLookupService:
             joined = joined.merge(c, on=keys, how="outer") if keys else pd.concat([joined, c], ignore_index=True, sort=False)
 
         joined = joined.fillna("")
+        self._trace(f"Packaging rows for NIIN={niin}: {len(joined)}")
         return joined.to_dict(orient="records")
 
     def get_freight_rows(self, niin: str) -> list[dict[str, Any]]:
@@ -214,6 +252,7 @@ class NsnLookupService:
         d = self._filter_by_niin(self._table_df(dss_tbl), niin) if dss_tbl else pd.DataFrame()
 
         if f.empty and d.empty:
+            self._trace(f"Freight rows for NIIN={niin}: 0")
             return []
         if f.empty:
             return d.fillna("").to_dict(orient="records")
@@ -228,9 +267,32 @@ class NsnLookupService:
             f2["__niin"] = self._clean_codes(f2[f_niin])
             d2["__niin"] = self._clean_codes(d2[d_niin])
             m = f2.merge(d2, on="__niin", how="outer", suffixes=("_FREIGHT", "_DSS"))
+            self._trace(f"Freight rows for NIIN={niin}: freight={len(f2)} dss={len(d2)} merged={len(m)}")
             return m.fillna("").to_dict(orient="records")
 
+        self._trace(f"Freight rows for NIIN={niin}: fallback concat rows={len(f)+len(d)}")
         return pd.concat([f, d], ignore_index=True, sort=False).fillna("").to_dict(orient="records")
+
+    def suggest_known_nsn(self) -> str | None:
+        p_nsn_tbl = self._find_table(["IDENTIFICATION__P_FLIS_NSN"])
+        if not p_nsn_tbl:
+            return None
+        df = self._table_df(p_nsn_tbl)
+        if df.empty:
+            return None
+        fsc_col = self._pick_column(df, ["FSC"])
+        niin_col = self._pick_column(df, ["NIIN"])
+        if not fsc_col or not niin_col:
+            return None
+        sample = df[(self._clean_codes(df[fsc_col]) != "") & (self._clean_codes(df[niin_col]) != "")]
+        if sample.empty:
+            return None
+        row = sample.iloc[0]
+        fsc = str(row[fsc_col]).strip()
+        niin = str(row[niin_col]).strip()
+        if len(fsc) == 4 and len(niin) == 9:
+            return f"{fsc}{niin}"
+        return None
 
     def build_user_friendly_result(
         self,
@@ -343,33 +405,46 @@ class NsnLookupService:
         )
 
     def lookup_nsn(self, nsn_or_niin: str) -> dict[str, Any]:
-        query = normalize_nsn(nsn_or_niin)
-        niin = query["niin"]
-        fsc = query.get("fsc")
+        try:
+            self._trace(f"--- Lookup start input={nsn_or_niin} ---")
+            query = normalize_nsn(nsn_or_niin)
+            niin = query["niin"]
+            fsc = query.get("fsc")
+            self._trace(f"Normalized query: FSC={fsc}, NIIN={niin}, NSN={query.get('nsn')}")
 
-        identification = self.get_identification(niin, fsc=fsc)
-        reference_rows = self.get_reference_rows(niin)
-        packaging_rows = self.get_packaging_rows(niin)
-        freight_rows = self.get_freight_rows(niin)
+            identification = self.get_identification(niin, fsc=fsc)
+            reference_rows = self.get_reference_rows(niin)
+            packaging_rows = self.get_packaging_rows(niin)
+            freight_rows = self.get_freight_rows(niin)
 
-        ref_df = pd.DataFrame(reference_rows)
-        cage_col = self._pick_column(ref_df, ["CAGE_CODE", "CAGE"])
-        cage_codes = set()
-        if cage_col:
-            cage_codes = set(self._clean_codes(ref_df[cage_col]))
-            cage_codes.discard("")
+            ref_df = pd.DataFrame(reference_rows)
+            cage_col = self._pick_column(ref_df, ["CAGE_CODE", "CAGE"])
+            cage_codes = set()
+            if cage_col:
+                cage_codes = set(self._clean_codes(ref_df[cage_col]))
+                cage_codes.discard("")
 
-        cage_rows = self.get_cage_details(cage_codes)
+            cage_rows = self.get_cage_details(cage_codes)
+            self._trace(
+                f"Lookup summary NIIN={niin}: identification={1 if identification else 0}, "
+                f"reference={len(reference_rows)}, cage={len(cage_rows)}, "
+                f"packaging={len(packaging_rows)}, freight={len(freight_rows)}"
+            )
 
-        result = self.build_user_friendly_result(
-            query=query,
-            identification=identification,
-            reference_rows=reference_rows,
-            cage_rows=cage_rows,
-            packaging_rows=packaging_rows,
-            freight_rows=freight_rows,
-        )
-        return result.to_dict()
+            result = self.build_user_friendly_result(
+                query=query,
+                identification=identification,
+                reference_rows=reference_rows,
+                cage_rows=cage_rows,
+                packaging_rows=packaging_rows,
+                freight_rows=freight_rows,
+            )
+            self._trace(f"--- Lookup end NIIN={niin} warnings={len(result.warnings)} ---")
+            return result.to_dict()
+        except Exception as exc:  # noqa: BLE001
+            self._error(f"Lookup error input={nsn_or_niin}: {exc}")
+            self._trace(f"--- Lookup failed input={nsn_or_niin}: {exc} ---")
+            raise
 
 
 def result_to_csv_bytes(result: dict[str, Any]) -> bytes:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -22,6 +23,20 @@ def _add_log(message: str) -> None:
     logs: list[str] = st.session_state.setdefault("logs", [])
     logs.append(f"[{_now_iso()}] {message}")
     st.session_state["logs"] = logs[-200:]
+
+
+def _tail_text_file(path: Path, lines: int = 60) -> str:
+    if not path.exists():
+        return f"(brak pliku: {path})"
+    content = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return "\n".join(content[-lines:]) if content else "(plik pusty)"
+
+
+def _append_error_log(message: str) -> None:
+    path = Path("logs/errors.log")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(f"{_now_iso()} | ERROR | {message}\n")
 
 
 def _init_state() -> None:
@@ -63,6 +78,15 @@ with st.expander("Logi działania (krótkie)", expanded=True):
     else:
         st.write("Brak logów jeszcze.")
 
+with st.expander("Logi plikowe (debug)", expanded=False):
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**logs/search_trace.log**")
+        st.code(_tail_text_file(Path("logs/search_trace.log")), language="text")
+    with col2:
+        st.markdown("**logs/errors.log**")
+        st.code(_tail_text_file(Path("logs/errors.log")), language="text")
+
 with st.sidebar:
     st.header("Konfiguracja")
     base_dir = st.text_input("Katalog źródłowy", value=".")
@@ -75,6 +99,7 @@ with st.sidebar:
             except Exception as exc:  # noqa: BLE001
                 st.session_state["last_error"] = str(exc)
                 _add_log(f"Błąd budowy indeksu: {exc}")
+                _append_error_log(f"Błąd budowy indeksu: {exc}")
                 st.error(f"Błąd budowy indeksu: {exc}")
             else:
                 _add_log("Indeks gotowy.")
@@ -94,11 +119,27 @@ if st.button("Szukaj"):
         except Exception as exc:  # noqa: BLE001
             st.session_state["last_error"] = str(exc)
             _add_log(f"Błąd lookup: {exc}")
+            _append_error_log(f"Błąd lookup: {exc}")
             st.error(f"Błąd: {exc}")
         else:
             st.session_state["last_result"] = result
             st.session_state["last_error"] = None
             _add_log("Lookup zakończony poprawnie.")
+
+if st.button("Podaj NSN testowy"):
+    service = NsnLookupService(db_path=db_path)
+    try:
+        sample_nsn = service.suggest_known_nsn()
+    except Exception as exc:  # noqa: BLE001
+        st.session_state["last_error"] = str(exc)
+        _add_log(f"Błąd pobrania NSN testowego: {exc}")
+        _append_error_log(f"Błąd pobrania NSN testowego: {exc}")
+    else:
+        if sample_nsn:
+            _add_log(f"NSN testowy z lokalnej bazy: {sample_nsn}")
+            st.success(f"NSN testowy znaleziony lokalnie: {sample_nsn}")
+        else:
+            st.warning("Nie udało się pobrać testowego NSN z lokalnej bazy.")
 
 
 def _render_result(result: dict[str, Any]) -> None:

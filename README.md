@@ -91,6 +91,10 @@ UI zawiera:
 - pole NSN/NIIN + przycisk `Szukaj`,
 - sekcje: podsumowanie, PN/producenci, packaging, freight, raw/debug,
 - eksport: JSON + CSV.
+- panel logów plikowych:
+  - `logs/search_trace.log` (krok po kroku jak lookup działa),
+  - `logs/errors.log` (błędy runtime build/lookup).
+- przycisk `Podaj NSN testowy` (bierze pierwszy poprawny FSC+NIIN z lokalnego `P_FLIS_NSN`).
 
 ## Architektura
 
