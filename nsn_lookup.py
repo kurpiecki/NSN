@@ -25,6 +25,9 @@ class QueryContext:
     niin: str
 
 
+REFERENCE_TECH_COLUMNS = ["RNCC", "RNVC", "DAC", "RNAAC", "RNFC", "RNSC", "RNJC", "CAGE_STATUS"]
+
+
 class NsnLookupService:
     def __init__(self, db_path: str | Path = "data/nsn.duckdb") -> None:
         self.db_path = Path(db_path)
@@ -152,17 +155,48 @@ class NsnLookupService:
         return rows
 
     def get_packaging_rows(self, *, ctx: QueryContext) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        for pat in [
+        collected: list[tuple[int, list[dict[str, Any]]]] = []
+        profile_counts: dict[str, int] = {}
+        for idx, pat in enumerate(
+            [
             "FREIGHT_PACKAGING__V_FLIS_PACKAGING_1",
             "FREIGHT_PACKAGING__V_FLIS_PACKAGING_2",
             "FREIGHT_PACKAGING__V_FLIS_PACKAGING_3",
-        ]:
+            ],
+            start=1,
+        ):
             tbl = self._find_table([pat], ctx=ctx)
             if not tbl:
                 continue
-            out.extend(self._query_rows_by_niin(table_name=tbl, niin=ctx.niin, ctx=ctx))
-        self._trace(ctx, f"packaging rows matched={len(out)}")
+            rows = self._query_rows_by_niin(table_name=tbl, niin=ctx.niin, ctx=ctx)
+            collected.append((idx, rows))
+            profile_counts[f"packaging_{idx}_rows"] = len(rows)
+
+        merged_profiles: dict[tuple[str, str], dict[str, Any]] = {}
+        for profile_idx, rows in collected:
+            for row in rows:
+                niin = str(row.get("NIIN", ctx.niin)).strip() or ctx.niin
+                pica_sica = str(row.get("PICA_SICA", "")).strip()
+                key = (niin, pica_sica)
+                profile = merged_profiles.setdefault(
+                    key,
+                    {
+                        "NIIN": niin,
+                        "PICA_SICA": pica_sica,
+                    },
+                )
+                for k, v in row.items():
+                    if k == "table_name":
+                        continue
+                    if str(v).strip() and (k not in profile or not str(profile[k]).strip()):
+                        profile[k] = v
+                profile[f"has_packaging_{profile_idx}"] = True
+        out = list(merged_profiles.values())
+        self._trace(
+            ctx,
+            "packaging rows matched="
+            f"{len(out)} details={profile_counts if profile_counts else {'packaging_1_rows': 0, 'packaging_2_rows': 0, 'packaging_3_rows': 0}}",
+        )
         return out
 
     def get_freight_rows(self, *, ctx: QueryContext) -> list[dict[str, Any]]:
@@ -245,6 +279,10 @@ class NsnLookupService:
             warnings.append("Brak freight rows.")
         if reference_rows and not cage_rows:
             warnings.append("Brak danych CAGE.")
+        if len(reference_rows) > 50:
+            warnings.append(
+                "Liczba referencji jest nietypowo duża; sprawdź, czy dane nie wymagają dodatkowego filtrowania."
+            )
 
         ref_df = pd.DataFrame(reference_rows)
         cage_df = pd.DataFrame(cage_rows)
@@ -267,14 +305,28 @@ class NsnLookupService:
         for _, row in ref_df.iterrows():
             cage_code = str(row.get(ref_cage_col, "")).strip().upper() if ref_cage_col else ""
             mfr = cage_map.get(cage_code, {})
+            source_fields = {
+                col.lower(): str(row.get(col, "")).strip()
+                for col in REFERENCE_TECH_COLUMNS
+                if col in ref_df.columns and str(row.get(col, "")).strip()
+            }
+            part_number_value = str(row.get(part_number_col, "")).strip() if part_number_col else ""
+            reference_type = "commercial_part_number"
+            upper_pn = part_number_value.upper()
+            if upper_pn.startswith(("MIL-", "MIL ", "MILPRF", "MIL-PRF", "AMS")):
+                reference_type = "specification_reference"
+            elif "/" in part_number_value or "," in part_number_value:
+                reference_type = "compound_reference"
             part_numbers.append(
                 {
-                    "part_number": str(row.get(part_number_col, "")).strip() if part_number_col else "",
+                    "part_number": part_number_value,
                     "cage_code": cage_code,
                     "manufacturer_name": mfr.get(mfr_name_col, "") if mfr_name_col else "",
                     "country": mfr.get(country_col, "") if country_col else "",
                     "city": mfr.get(city_col, "") if city_col else "",
+                    "reference_type": reference_type,
                     "notes": "Kwalifikująca referencja z V_FLIS_PART (po NIIN).",
+                    **source_fields,
                 }
             )
 
@@ -287,9 +339,14 @@ class NsnLookupService:
         status = LookupStatus(
             found_in_identification=found_in_identification,
             reference_rows_found=len(reference_rows),
+            reference_rows_after_cage_join=len(part_numbers),
             packaging_rows_found=len(packaging_rows),
             freight_rows_found=len(freight_rows),
             cage_rows_found=len(cage_rows),
+            ui_rows_shown=len(part_numbers),
+            exported_part_rows=len(part_numbers),
+            exported_packaging_rows=len(packaging_rows),
+            exported_freight_rows=len(freight_rows),
         )
 
         return LookupResult(
@@ -316,6 +373,14 @@ class NsnLookupService:
                 "packaging_rows": packaging_rows,
                 "freight_rows": freight_rows,
                 "cage_rows": cage_rows,
+                "diagnostics": {
+                    "reference_rows_raw": len(reference_rows),
+                    "reference_rows_after_cage_join": len(part_numbers),
+                    "ui_part_rows": len(part_numbers),
+                    "export_json_part_rows": len(part_numbers),
+                    "export_json_packaging_rows": len(packaging_rows),
+                    "export_json_freight_rows": len(freight_rows),
+                },
             },
         )
 

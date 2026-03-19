@@ -121,7 +121,23 @@ def _render_result(result: dict[str, Any]) -> None:
         st.warning("Brak rekordu w Identification")
 
     st.subheader("SEKCJA 2: Part numbers / kwalifikujące się produkty")
-    st.dataframe(pd.DataFrame(result.get("part_numbers", [])), use_container_width=True)
+    part_rows = result.get("part_numbers", [])
+    if len(part_rows) > 50:
+        st.warning(
+            f"Liczba referencji jest nietypowo duża ({len(part_rows)}). Sprawdź, czy dane nie wymagają dodatkowego filtrowania."
+        )
+    default_show_all = len(part_rows) <= 50
+    show_all = st.checkbox(
+        f"Pokaż wszystkie referencje ({len(part_rows)})",
+        value=default_show_all,
+        key=f"show_all_part_rows_{result.get('query_id')}",
+    )
+    if show_all:
+        shown_rows = part_rows
+    else:
+        shown_rows = part_rows[:20]
+        st.info(f"Wyświetlono {len(shown_rows)} z {len(part_rows)} rekordów. Zaznacz 'Pokaż wszystkie referencje'.")
+    st.dataframe(pd.DataFrame(shown_rows), use_container_width=True)
 
     st.subheader("SEKCJA 3: Packaging / opakowania")
     st.info("Profile dotyczą NIIN/NSN. Brak automatycznego mapowania PN -> packaging bez jawnego klucza.")

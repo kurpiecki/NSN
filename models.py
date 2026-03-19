@@ -18,9 +18,14 @@ class NormalizedQuery:
 class LookupStatus:
     found_in_identification: bool
     reference_rows_found: int
+    reference_rows_after_cage_join: int
     packaging_rows_found: int
     freight_rows_found: int
     cage_rows_found: int
+    ui_rows_shown: int
+    exported_part_rows: int
+    exported_packaging_rows: int
+    exported_freight_rows: int
 
 
 @dataclass(slots=True)
@@ -44,9 +49,14 @@ class LookupResult:
             "status": {
                 "found_in_identification": self.status.found_in_identification,
                 "reference_rows_found": self.status.reference_rows_found,
+                "reference_rows_after_cage_join": self.status.reference_rows_after_cage_join,
                 "packaging_rows_found": self.status.packaging_rows_found,
                 "freight_rows_found": self.status.freight_rows_found,
                 "cage_rows_found": self.status.cage_rows_found,
+                "ui_rows_shown": self.status.ui_rows_shown,
+                "exported_part_rows": self.status.exported_part_rows,
+                "exported_packaging_rows": self.status.exported_packaging_rows,
+                "exported_freight_rows": self.status.exported_freight_rows,
             },
             "identification": self.identification,
             "part_numbers": self.part_numbers,
