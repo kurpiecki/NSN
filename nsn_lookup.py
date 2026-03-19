@@ -38,9 +38,10 @@ class NsnLookupService:
         return None
 
     def _with_niin(self, df: pd.DataFrame) -> pd.DataFrame:
-        if df.empty:
-            return df
         out = df.copy()
+        if out.empty:
+            out["__niin_guess"] = pd.Series(dtype="string")
+            return out
         joined = out.astype(str).agg("|".join, axis=1)
         out["__niin_guess"] = joined.str.extract(r"(\d{9})", expand=False)
         return out

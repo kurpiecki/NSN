@@ -43,13 +43,13 @@ class NsnIndexBuilder:
             f"""
             CREATE OR REPLACE VIEW {view_name} AS
             SELECT *
-            FROM read_csv(
+            FROM read_csv_auto(
                 '{file_path.as_posix()}',
                 delim='{delimiter}',
                 header=true,
                 all_varchar=true,
                 ignore_errors=true,
-                auto_detect=false,
+                auto_detect=true,
                 quote='"',
                 escape='"',
                 encoding='{encoding}'
