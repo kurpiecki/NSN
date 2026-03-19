@@ -102,12 +102,13 @@ def _render_result(result: dict[str, Any]) -> None:
     cols[2].metric("FSC", query.get("fsc") or "-")
     cols[3].metric("NIIN", query.get("niin"))
 
-    cols = st.columns(5)
+    cols = st.columns(6)
     cols[0].metric("ID found", "TAK" if status.get("found_in_identification") else "NIE")
     cols[1].metric("Reference", status.get("reference_rows_found", 0))
     cols[2].metric("Packaging", status.get("packaging_rows_found", 0))
     cols[3].metric("Freight", status.get("freight_rows_found", 0))
     cols[4].metric("CAGE", status.get("cage_rows_found", 0))
+    cols[5].metric("Characteristics", status.get("characteristics_rows_found", 0))
 
     cols = st.columns(3)
     cols[0].metric("Part numbers", summary.get("unique_part_numbers", 0))
@@ -146,7 +147,26 @@ def _render_result(result: dict[str, Any]) -> None:
     st.subheader("SEKCJA 4: Freight / transport")
     st.dataframe(pd.DataFrame(result.get("freight", [])), use_container_width=True)
 
-    st.subheader("SEKCJA 5: Debug")
+    st.subheader("SEKCJA 5: Characteristics / cechy itemu")
+    characteristics = result.get("characteristics", {})
+    characteristics_summary = characteristics.get("summary", {}) if isinstance(characteristics, dict) else {}
+    characteristics_rows = characteristics.get("rows", []) if isinstance(characteristics, dict) else []
+
+    cols = st.columns(3)
+    cols[0].metric("Forma fizyczna", characteristics_summary.get("physical_form_raw") or "-")
+    quantity_raw = characteristics_summary.get("quantity_within_each_unit_package_raw")
+    cols[1].metric("Ilość w opakowaniu jednostkowym", quantity_raw or "-")
+    cols[2].metric("Jednostka", characteristics_summary.get("quantity_unit") or "-")
+
+    if characteristics_rows:
+        st.dataframe(
+            pd.DataFrame(characteristics_rows)[["mrc", "requirements_statement", "clear_text_reply"]],
+            use_container_width=True,
+        )
+    else:
+        st.warning("brak danych CHARACTERISTICS dla tego NIIN")
+
+    st.subheader("SEKCJA 6: Debug")
     debug = {
         "query_id": result.get("query_id"),
         "normalized_nsn": query.get("nsn"),

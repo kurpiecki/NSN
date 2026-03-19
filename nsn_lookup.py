@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,10 @@ class NsnLookupService:
         self._con = self._connect()
         self._tables = self._load_tables()
         self._table_columns: dict[str, list[str]] = {}
+        self._characteristics_loader_initialized = self._is_characteristics_loader_initialized()
+        self._characteristics_table_name = self._find_characteristics_table()
+        self._trace(None, f"characteristics loader initialized={self._characteristics_loader_initialized}")
+        self._trace(None, f"V_CHARACTERISTICS.CSV found={bool(self._characteristics_table_name)} table={self._characteristics_table_name or '-'}")
 
     @staticmethod
     def _build_file_logger(name: str, path: Path) -> logging.Logger:
@@ -103,6 +108,51 @@ class NsnLookupService:
                     return t
         self._trace(ctx, f"table not found patterns={patterns}")
         return None
+
+    def _is_characteristics_loader_initialized(self) -> bool:
+        return any(t.upper().startswith("CHARACTERISTICS__") for t in self._tables)
+
+    def _find_characteristics_table(self) -> str | None:
+        preferred = "characteristics__v_characteristics"
+        for table_name in self._tables:
+            if table_name.lower() == preferred:
+                return table_name
+        for table_name in self._tables:
+            if "CHARACTERISTICS" in table_name.upper():
+                return table_name
+        return None
+
+    @staticmethod
+    def _normalized_column_name(value: str) -> str:
+        return "".join(ch for ch in value.upper() if ch.isalnum())
+
+    def _resolve_characteristics_columns(self, table_name: str, *, ctx: QueryContext) -> dict[str, str] | None:
+        columns = self._columns(table_name)
+        expected_map = {
+            "niin": "NIIN",
+            "mrc": "MRC",
+            "requirements_statement": "REQUIREMENTS_STATEMENT",
+            "clear_text_reply": "CLEAR_TEXT_REPLY",
+        }
+        normalized = {self._normalized_column_name(col): col for col in columns}
+        resolved: dict[str, str] = {}
+        for field_name, expected_name in expected_map.items():
+            target = self._normalized_column_name(expected_name)
+            direct = normalized.get(target)
+            if direct:
+                resolved[field_name] = direct
+                continue
+            for normalized_name, original in normalized.items():
+                if target in normalized_name:
+                    resolved[field_name] = original
+                    break
+        if "niin" not in resolved:
+            self._trace(ctx, f"characteristics column detection failed table={table_name}: NIIN missing")
+            return None
+        missing = [name for name in ["mrc", "requirements_statement", "clear_text_reply"] if name not in resolved]
+        if missing:
+            self._trace(ctx, f"characteristics column fallback unresolved table={table_name} missing={missing}")
+        return resolved
 
     def _query_rows_by_niin(self, *, table_name: str, niin: str, ctx: QueryContext, fsc: str | None = None) -> list[dict[str, Any]]:
         cols = self._columns(table_name)
@@ -240,6 +290,120 @@ class NsnLookupService:
         self._trace(ctx, f"cage rows matched={len(result)}")
         return result
 
+    def get_characteristics_rows(self, niin: str, *, ctx: QueryContext) -> tuple[list[dict[str, Any]], list[str]]:
+        warnings: list[str] = []
+        if not self._characteristics_loader_initialized:
+            warning = "folder CHARACTERISTICS niedostępny"
+            warnings.append(warning)
+            self._trace(ctx, f"characteristics loader unavailable: {warning}")
+            self._trace(ctx, f"characteristics_rows_found for NIIN={niin}: 0")
+            return [], warnings
+
+        if not self._characteristics_table_name:
+            warning = "brak pliku V_CHARACTERISTICS.CSV"
+            warnings.append(warning)
+            self._trace(ctx, f"characteristics file unavailable: {warning}")
+            self._trace(ctx, f"characteristics_rows_found for NIIN={niin}: 0")
+            return [], warnings
+
+        table_name = self._characteristics_table_name
+        resolved = self._resolve_characteristics_columns(table_name, ctx=ctx)
+        if not resolved:
+            warning = "Nie udało się dopasować kolumn CHARACTERISTICS (oczekiwane: NIIN, MRC, REQUIREMENTS_STATEMENT, CLEAR_TEXT_REPLY)."
+            warnings.append(warning)
+            self._trace(ctx, warning)
+            self._trace(ctx, f"characteristics_rows_found for NIIN={niin}: 0")
+            return [], warnings
+
+        niin_col = resolved["niin"]
+        sql = f'SELECT * FROM "{table_name}" WHERE UPPER(TRIM(COALESCE("{niin_col}", ''))) = ?'
+        df = self._con.execute(sql, [niin]).fetchdf()
+        self._trace(ctx, f"characteristics_rows_found for NIIN={niin}: {len(df)}")
+        if df.empty:
+            warnings.append("brak danych CHARACTERISTICS dla tego NIIN")
+            return [], warnings
+
+        rows: list[dict[str, Any]] = []
+        for row in df.fillna("").to_dict(orient="records"):
+            rows.append(
+                {
+                    "niin": str(row.get(resolved["niin"], "")).strip(),
+                    "mrc": str(row.get(resolved.get("mrc", ""), "")).strip() if resolved.get("mrc") else "",
+                    "requirements_statement": str(row.get(resolved.get("requirements_statement", ""), "")).strip()
+                    if resolved.get("requirements_statement")
+                    else "",
+                    "clear_text_reply": str(row.get(resolved.get("clear_text_reply", ""), "")).strip()
+                    if resolved.get("clear_text_reply")
+                    else "",
+                }
+            )
+        return rows, warnings
+
+    @staticmethod
+    def extract_quantity_and_unit(text: str | None) -> tuple[float | None, str | None]:
+        if not text:
+            return None, None
+        candidate = str(text).strip()
+        if not candidate:
+            return None, None
+        match = re.match(r"^\s*(\d+(?:\.\d+)?)\s+([A-Za-z][A-Za-z0-9\-/ ]*)\s*$", candidate)
+        if not match:
+            return None, None
+        value_raw = match.group(1)
+        unit_raw = match.group(2).strip()
+        if not unit_raw:
+            return None, None
+        try:
+            value = float(value_raw)
+        except ValueError:
+            return None, None
+        return value, unit_raw
+
+    @staticmethod
+    def _is_statement_match(statement: str, target: str) -> bool:
+        return target.lower() in statement.lower()
+
+    def detect_physical_form(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        physical_form_raw = None
+        physical_form_normalized = None
+        for row in rows:
+            statement = str(row.get("requirements_statement", "")).strip()
+            if statement and self._is_statement_match(statement, "Physical Form"):
+                reply = str(row.get("clear_text_reply", "")).strip()
+                if reply:
+                    physical_form_raw = reply
+                    if reply.lower() in {"liquid", "solid", "powder", "gas", "paste", "gel"}:
+                        physical_form_normalized = reply.lower()
+                break
+        return {
+            "physical_form_raw": physical_form_raw,
+            "physical_form_normalized": physical_form_normalized,
+        }
+
+    def summarize_characteristics(self, rows: list[dict[str, Any]], *, ctx: QueryContext) -> dict[str, Any]:
+        physical = self.detect_physical_form(rows)
+        quantity_raw = None
+        for row in rows:
+            statement = str(row.get("requirements_statement", "")).strip()
+            if statement and self._is_statement_match(statement, "Quantity Within Each Unit Package"):
+                reply = str(row.get("clear_text_reply", "")).strip()
+                if reply:
+                    quantity_raw = reply
+                break
+        quantity_value, quantity_unit = self.extract_quantity_and_unit(quantity_raw)
+        summary = {
+            "physical_form_raw": physical.get("physical_form_raw"),
+            "physical_form_normalized": physical.get("physical_form_normalized"),
+            "quantity_within_each_unit_package_raw": quantity_raw,
+            "quantity_value": quantity_value,
+            "quantity_unit": quantity_unit,
+        }
+        self._trace(ctx, f"extracted_physical_form={summary.get('physical_form_raw')}")
+        self._trace(ctx, f"extracted_quantity_raw={summary.get('quantity_within_each_unit_package_raw')}")
+        self._trace(ctx, f"extracted_quantity_value={summary.get('quantity_value')}")
+        self._trace(ctx, f"extracted_quantity_unit={summary.get('quantity_unit')}")
+        return summary
+
     @staticmethod
     def _pick_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
         if df.empty:
@@ -264,6 +428,9 @@ class NsnLookupService:
         cage_rows: list[dict[str, Any]],
         packaging_rows: list[dict[str, Any]],
         freight_rows: list[dict[str, Any]],
+        characteristics_rows: list[dict[str, Any]],
+        characteristics_summary: dict[str, Any],
+        characteristics_warnings: list[str],
     ) -> LookupResult:
         warnings: list[str] = []
         found_in_identification = identification is not None
@@ -277,6 +444,7 @@ class NsnLookupService:
             warnings.append("Brak packaging rows.")
         if not freight_rows:
             warnings.append("Brak freight rows.")
+        warnings.extend(characteristics_warnings)
         if reference_rows and not cage_rows:
             warnings.append("Brak danych CAGE.")
         if len(reference_rows) > 50:
@@ -334,6 +502,7 @@ class NsnLookupService:
             "unique_part_numbers": len({p["part_number"] for p in part_numbers if p["part_number"]}),
             "unique_manufacturers": len({p["cage_code"] for p in part_numbers if p["cage_code"]}),
             "unique_packaging_profiles": len(packaging_rows),
+            "characteristics_rows": len(characteristics_rows),
         }
 
         status = LookupStatus(
@@ -344,9 +513,11 @@ class NsnLookupService:
             freight_rows_found=len(freight_rows),
             cage_rows_found=len(cage_rows),
             ui_rows_shown=len(part_numbers),
+            characteristics_rows_found=len(characteristics_rows),
             exported_part_rows=len(part_numbers),
             exported_packaging_rows=len(packaging_rows),
             exported_freight_rows=len(freight_rows),
+            exported_characteristics_rows=len(characteristics_rows),
         )
 
         return LookupResult(
@@ -358,6 +529,10 @@ class NsnLookupService:
             manufacturers=list(cage_map.values()),
             packaging_profiles=packaging_rows,
             freight=freight_rows,
+            characteristics={
+                "summary": characteristics_summary,
+                "rows": characteristics_rows,
+            },
             warnings=warnings,
             summary=summary,
             raw={
@@ -372,6 +547,7 @@ class NsnLookupService:
                 "reference_rows": reference_rows,
                 "packaging_rows": packaging_rows,
                 "freight_rows": freight_rows,
+                "characteristics_rows": characteristics_rows,
                 "cage_rows": cage_rows,
                 "diagnostics": {
                     "reference_rows_raw": len(reference_rows),
@@ -380,6 +556,7 @@ class NsnLookupService:
                     "export_json_part_rows": len(part_numbers),
                     "export_json_packaging_rows": len(packaging_rows),
                     "export_json_freight_rows": len(freight_rows),
+                    "export_json_characteristics_rows": len(characteristics_rows),
                 },
             },
         )
@@ -427,6 +604,8 @@ class NsnLookupService:
 
             packaging_rows = self.get_packaging_rows(ctx=ctx)
             freight_rows = self.get_freight_rows(ctx=ctx)
+            characteristics_rows, characteristics_warnings = self.get_characteristics_rows(ctx.niin, ctx=ctx)
+            characteristics_summary = self.summarize_characteristics(characteristics_rows, ctx=ctx)
 
             result = self.build_user_friendly_result(
                 ctx=ctx,
@@ -436,6 +615,9 @@ class NsnLookupService:
                 cage_rows=cage_rows,
                 packaging_rows=packaging_rows,
                 freight_rows=freight_rows,
+                characteristics_rows=characteristics_rows,
+                characteristics_summary=characteristics_summary,
+                characteristics_warnings=characteristics_warnings,
             )
             self._trace(
                 ctx,
@@ -444,6 +626,7 @@ class NsnLookupService:
                 f"reference:{result.status.reference_rows_found} "
                 f"packaging:{result.status.packaging_rows_found} "
                 f"freight:{result.status.freight_rows_found} "
+                f"characteristics:{result.status.characteristics_rows_found} "
                 f"cage:{result.status.cage_rows_found}",
             )
             return result.to_dict()
@@ -461,6 +644,19 @@ def result_to_csv_bytes(result: dict[str, Any]) -> bytes:
             df = pd.DataFrame(rows)
             df.insert(0, "section", key)
             frames.append(df)
+
+    characteristics = result.get("characteristics", {})
+    characteristics_rows = characteristics.get("rows", []) if isinstance(characteristics, dict) else []
+    if characteristics_rows:
+        df = pd.DataFrame(characteristics_rows)
+        df.insert(0, "section", "characteristics_rows")
+        frames.append(df)
+
+    characteristics_summary = characteristics.get("summary", {}) if isinstance(characteristics, dict) else {}
+    if characteristics_summary:
+        df = pd.DataFrame([characteristics_summary])
+        df.insert(0, "section", "characteristics_summary")
+        frames.append(df)
 
     if not frames:
         return b""

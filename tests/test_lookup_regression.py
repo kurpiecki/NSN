@@ -21,6 +21,9 @@ def _create_test_db(path: Path) -> None:
     con.execute("CREATE TABLE freight_packaging__v_flis_packaging_2 (NIIN VARCHAR, PICA_SICA VARCHAR, PACKAGE_QTY VARCHAR)")
     con.execute("CREATE TABLE freight_packaging__v_flis_packaging_3 (NIIN VARCHAR, PICA_SICA VARCHAR, PACKAGE_TYPE VARCHAR)")
     con.execute("CREATE TABLE freight_packaging__v_freight (NIIN VARCHAR, FREIGHT_CLASS VARCHAR)")
+    con.execute(
+        "CREATE TABLE characteristics__v_characteristics (NIIN VARCHAR, MRC VARCHAR, REQUIREMENTS_STATEMENT VARCHAR, CLEAR_TEXT_REPLY VARCHAR)"
+    )
 
     con.execute("INSERT INTO identification__p_flis_nsn VALUES ('4935','000000012','A')")
     con.execute("INSERT INTO identification__p_flis_nsn VALUES ('6850','010445034','B')")
@@ -42,6 +45,14 @@ def _create_test_db(path: Path) -> None:
     con.execute("INSERT INTO freight_packaging__v_flis_packaging_1 VALUES ('000000012','P2')")
     con.execute("INSERT INTO freight_packaging__v_flis_packaging_2 VALUES ('000000012','P2','5')")
     con.execute("INSERT INTO freight_packaging__v_freight VALUES ('010445034','F2')")
+    con.execute(
+        """
+        INSERT INTO characteristics__v_characteristics VALUES
+        ('000000012','ABCD','Physical Form','LIQUID'),
+        ('000000012','EFGH','Quantity Within Each Unit Package','4.0 OUNCES'),
+        ('010445034','IJKL','Color','CLEAR')
+        """
+    )
     con.close()
 
 
@@ -135,3 +146,33 @@ def test_export_contains_all_rows_returned_by_lookup(tmp_path: Path) -> None:
     assert result["status"]["exported_part_rows"] == len(result["part_numbers"])
     assert result["status"]["exported_packaging_rows"] == len(result["packaging_profiles"])
     assert result["status"]["ui_rows_shown"] == len(result["part_numbers"])
+    assert result["status"]["exported_characteristics_rows"] == len(result["characteristics"]["rows"])
+
+
+def test_characteristics_rows_and_summary_are_exposed(tmp_path: Path) -> None:
+    db_path = tmp_path / "nsn.duckdb"
+    _create_test_db(db_path)
+    service = NsnLookupService(db_path=db_path)
+
+    result = service.lookup_nsn("4935000000012")
+
+    assert result["status"]["characteristics_rows_found"] == 2
+    assert len(result["characteristics"]["rows"]) == 2
+    assert result["characteristics"]["summary"]["physical_form_raw"] == "LIQUID"
+    assert result["characteristics"]["summary"]["quantity_within_each_unit_package_raw"] == "4.0 OUNCES"
+    assert result["characteristics"]["summary"]["quantity_value"] == 4.0
+    assert result["characteristics"]["summary"]["quantity_unit"] == "OUNCES"
+
+
+def test_characteristics_missing_table_does_not_break_lookup(tmp_path: Path) -> None:
+    db_path = tmp_path / "nsn.duckdb"
+    _create_test_db(db_path)
+    con = duckdb.connect(str(db_path))
+    con.execute("DROP TABLE characteristics__v_characteristics")
+    con.close()
+    service = NsnLookupService(db_path=db_path)
+
+    result = service.lookup_nsn("4935000000012")
+
+    assert result["characteristics"]["rows"] == []
+    assert "folder CHARACTERISTICS niedostępny" in result["warnings"]
