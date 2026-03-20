@@ -9,9 +9,18 @@ Aplikacja Streamlit do przetwarzania pliku wejściowego (`row_no`, `number`, `sp
 
 ## Kluczowe funkcje
 - zakres obróbki po `row_no` (od/do),
+- możliwość wgrania gotowego `decoded_nsn_parts.csv` (bez ponownej analizy NSN),
+- możliwość pobrania aktualnego pliku `decoded_nsn_parts.csv` lub szablonu tego formatu,
+- tryb testowy: zapis `prompt1_output.csv` i osobne uruchamianie prompt2 na wybranym zakresie wierszy,
+- w trybie testowym prompt2 działa rekord-po-rekordzie (1 zapytanie API na 1 wiersz z `prompt1_output.csv`),
 - stały numer `row_no` w każdym rekordzie wynikowym,
 - ustawiany w UI model Perplexity (program go nie nadpisuje),
+- domyślny model ustawiony na ChatGPT (`openai/gpt-5.2`) + lista pozostałych modeli w menu,
 - ustawienia `MAX OUTPUT TOKENS` (1-1200) i `MAX STEPS` (1-10),
+- ustawiany timeout API w sekundach (przerwanie requestu po przekroczeniu limitu),
+- kontrola paczek wysyłanych do API (ile wierszy w jednym uruchomieniu),
+- do promptu trafia jeden rekord `row_no` naraz wraz z pełną listą kandydatów PN/producent dla tego samego `row_no`,
+- przyciski sterujące przebiegiem: Start/Wznów, Pauza, Stop+reset,
 - podgląd request/response API,
 - przeliczanie cen do PLN po kursach z UI (EUR/USD/GBP),
 - Cleaner: archiwizacja i czyszczenie plików roboczych.

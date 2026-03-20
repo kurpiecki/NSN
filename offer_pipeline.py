@@ -69,14 +69,29 @@ def load_prompt(path: str | Path) -> str:
 
 
 def parse_json_rows(api_text: str) -> list[dict[str, Any]]:
-    stripped = api_text.strip()
+    stripped = (api_text or "").strip()
     if not stripped:
         return []
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
+        stripped = re.sub(r"\s*```$", "", stripped)
     parsed: Any
     try:
         parsed = json.loads(stripped)
     except json.JSONDecodeError:
-        return []
+        parsed = None
+        for opener, closer in [("[", "]"), ("{", "}")]:
+            start = stripped.find(opener)
+            end = stripped.rfind(closer)
+            if start != -1 and end != -1 and end > start:
+                candidate = stripped[start : end + 1]
+                try:
+                    parsed = json.loads(candidate)
+                    break
+                except json.JSONDecodeError:
+                    continue
+        if parsed is None:
+            return []
     if isinstance(parsed, dict):
         return [parsed]
     if isinstance(parsed, list):
@@ -145,22 +160,87 @@ def run_perplexity_pipeline(
     max_output_tokens: int,
     fx_rates: FxRates,
     progress_cb: callable | None = None,
+    log_cb: callable | None = None,
+    start_index: int = 0,
+    row_limit: int | None = None,
 ) -> tuple[pd.DataFrame, list[dict[str, str]]]:
-    offer_rows: list[dict[str, Any]] = []
+    prompt1_df, logs1 = run_prompt1_stage(
+        decode_df,
+        client=client,
+        model=model,
+        prompt1=prompt1,
+        max_steps=max_steps,
+        max_output_tokens=max_output_tokens,
+        progress_cb=progress_cb,
+        log_cb=log_cb,
+        start_index=start_index,
+        row_limit=row_limit,
+    )
+    out_df, logs2 = run_prompt2_stage(
+        prompt1_df,
+        client=client,
+        model=model,
+        prompt2=prompt2,
+        max_steps=max_steps,
+        max_output_tokens=max_output_tokens,
+        fx_rates=fx_rates,
+        progress_cb=None,
+        log_cb=log_cb,
+    )
+    return out_df, logs1 + logs2
+
+
+def run_prompt1_stage(
+    decode_df: pd.DataFrame,
+    *,
+    client: PerplexityClient,
+    model: str,
+    prompt1: str,
+    max_steps: int,
+    max_output_tokens: int,
+    progress_cb: callable | None = None,
+    log_cb: callable | None = None,
+    start_index: int = 0,
+    row_limit: int | None = None,
+) -> tuple[pd.DataFrame, list[dict[str, str]]]:
+    stage_rows: list[dict[str, Any]] = []
     logs: list[dict[str, str]] = []
 
     active_df = decode_df[decode_df["nsn"] != "BRAK"].copy()
-    for idx, (_, row) in enumerate(active_df.iterrows(), start=1):
-        row_no = int(row["row_no"])
-        if progress_cb:
-            progress_cb(idx, len(active_df), row_no)
+    grouped_rows: list[tuple[int, pd.DataFrame]] = []
+    for row_no, group in active_df.groupby("row_no", sort=True):
+        grouped_rows.append((int(row_no), group.reset_index(drop=True)))
 
-        spec = str(row.get("input_specification", ""))
+    if start_index < 0:
+        start_index = 0
+    if start_index >= len(grouped_rows):
+        return pd.DataFrame(columns=FIRST_STAGE_COLUMNS), []
+    if row_limit is None:
+        scoped_groups = grouped_rows[start_index:]
+    else:
+        scoped_groups = grouped_rows[start_index : start_index + max(row_limit, 0)]
+
+    for idx, (row_no, group) in enumerate(scoped_groups, start=1):
+        if progress_cb:
+            progress_cb(idx, len(scoped_groups), row_no)
+
+        first_row = group.iloc[0]
+        spec = str(first_row.get("input_specification", ""))
+        nsn = str(first_row.get("nsn", ""))
+        grouped_parts: list[dict[str, str]] = []
+        for _, part_row in group.iterrows():
+            grouped_parts.append(
+                {
+                    "part_number": str(part_row.get("part_number", "")),
+                    "manufacturer_name": str(part_row.get("manufacturer_name", "")),
+                    "supplier_country": str(part_row.get("supplier_country", "")),
+                    "cage_code": str(part_row.get("cage_code", "")),
+                }
+            )
+
         context = (
-            f"row_no={row_no}\nNSN={row.get('nsn', '')}\n"
-            f"part_number={row.get('part_number', '')}\nmanufacturer={row.get('manufacturer_name', '')}\n"
-            f"supplier_country={row.get('supplier_country', '')}\ncage_code={row.get('cage_code', '')}\n"
-            f"specification={spec}"
+            f"row_no={row_no}\nNSN={nsn}\nspecification={spec}\n"
+            f"candidate_parts_for_row_no={json.dumps(grouped_parts, ensure_ascii=False)}"
         )
         first_input = f"{prompt1}\n\n{context}".strip()
         first_text = client.create_response_text(
@@ -170,35 +250,86 @@ def run_perplexity_pipeline(
             max_output_tokens=max_output_tokens,
             tools=[{"type": "web_search"}],
         )
-        logs.append({"stage": "prompt1", "row_no": str(row_no), "request": first_input[:3000], "response": first_text[:3000]})
+        prompt1_log = {"stage": "prompt1", "row_no": str(row_no), "request": first_input[:3000], "response": first_text[:3000]}
+        logs.append(prompt1_log)
+        if log_cb:
+            log_cb(prompt1_log)
         first_rows = parse_json_rows(first_text)
 
         for item in first_rows:
-            normalized = {k: item.get(k, "") for k in FIRST_STAGE_COLUMNS}
+            normalized = {str(k): v for k, v in item.items()}
+            for key in FIRST_STAGE_COLUMNS:
+                normalized.setdefault(key, "")
             normalized["row_no"] = row_no
-            normalized["part_number"] = normalized["part_number"] or row.get("part_number", "")
-            normalized["cage_code"] = normalized["cage_code"] or row.get("cage_code", "")
-            normalized["nsn"] = normalized["nsn"] or row.get("nsn", "")
+            normalized["part_number"] = normalized["part_number"] or str(first_row.get("part_number", ""))
+            normalized["cage_code"] = normalized["cage_code"] or str(first_row.get("cage_code", ""))
+            normalized["nsn"] = normalized["nsn"] or nsn
+            stage_rows.append(normalized)
 
-            second_input = f"{prompt2}\n\n{json.dumps(normalized, ensure_ascii=False)}"
-            second_text = client.create_response_text(
-                model=model,
-                input_text=second_input,
-                max_steps=max_steps,
-                max_output_tokens=max_output_tokens,
-                tools=[{"type": "web_search"}],
-            )
-            logs.append({"stage": "prompt2", "row_no": str(row_no), "request": second_input[:3000], "response": second_text[:3000]})
-            second_rows = parse_json_rows(second_text)
-            if not second_rows:
-                second_rows = [normalized]
-            for out in second_rows:
-                final = {k: out.get(k, normalized.get(k, "")) for k in FIRST_STAGE_COLUMNS}
-                final["row_no"] = row_no
-                price_pln = parse_price_to_pln(str(final.get("listed_price", "")), fx_rates)
-                final["listed_price_pln"] = "" if price_pln is None else round(price_pln, 2)
-                final["oznaczenie_oferowanego_produktu_nr_nsn_pn"] = f"NSN={final.get('nsn', '')} / PN={final.get('part_number', '')}"
-                offer_rows.append(final)
+    stage_df = pd.DataFrame(stage_rows)
+    if stage_df.empty:
+        stage_df = pd.DataFrame(columns=FIRST_STAGE_COLUMNS)
+    else:
+        for key in FIRST_STAGE_COLUMNS:
+            if key not in stage_df.columns:
+                stage_df[key] = ""
+    return stage_df, logs
+
+
+def run_prompt2_stage(
+    prompt1_df: pd.DataFrame,
+    *,
+    client: PerplexityClient,
+    model: str,
+    prompt2: str,
+    max_steps: int,
+    max_output_tokens: int,
+    fx_rates: FxRates,
+    progress_cb: callable | None = None,
+    log_cb: callable | None = None,
+    start_index: int = 0,
+    row_limit: int | None = None,
+) -> tuple[pd.DataFrame, list[dict[str, str]]]:
+    offer_rows: list[dict[str, Any]] = []
+    logs: list[dict[str, str]] = []
+    stage_input_df = prompt1_df.copy().reset_index(drop=True)
+    if start_index < 0:
+        start_index = 0
+    if start_index >= len(stage_input_df):
+        return pd.DataFrame(columns=FINAL_COLUMNS), []
+    if row_limit is None:
+        scoped_df = stage_input_df.iloc[start_index:]
+    else:
+        scoped_df = stage_input_df.iloc[start_index : start_index + max(row_limit, 0)]
+    for idx, (_, row) in enumerate(scoped_df.iterrows(), start=1):
+        row_no = int(row.get("row_no", 0))
+        if progress_cb:
+            progress_cb(idx, len(scoped_df), row_no)
+        normalized = row.to_dict()
+        for key in FIRST_STAGE_COLUMNS:
+            normalized.setdefault(key, "")
+        second_input = f"{prompt2}\n\n{json.dumps(normalized, ensure_ascii=False)}"
+        second_text = client.create_response_text(
+            model=model,
+            input_text=second_input,
+            max_steps=max_steps,
+            max_output_tokens=max_output_tokens,
+            tools=[{"type": "web_search"}],
+        )
+        prompt2_log = {"stage": "prompt2", "row_no": str(row_no), "request": second_input[:3000], "response": second_text[:3000]}
+        logs.append(prompt2_log)
+        if log_cb:
+            log_cb(prompt2_log)
+        second_rows = parse_json_rows(second_text)
+        if not second_rows:
+            second_rows = [normalized]
+        for out in second_rows:
+            final = {k: out.get(k, normalized.get(k, "")) for k in FIRST_STAGE_COLUMNS}
+            final["row_no"] = row_no
+            price_pln = parse_price_to_pln(str(final.get("listed_price", "")), fx_rates)
+            final["listed_price_pln"] = "" if price_pln is None else round(price_pln, 2)
+            final["oznaczenie_oferowanego_produktu_nr_nsn_pn"] = f"NSN={final.get('nsn', '')} / PN={final.get('part_number', '')}"
+            offer_rows.append(final)
 
     out_df = pd.DataFrame(offer_rows)
     if out_df.empty:
