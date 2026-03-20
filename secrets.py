@@ -1,0 +1,2 @@
+PERPLEXITY_API_KEY = "WSTAW_TUTAJ"
+PERPLEXITY_BASE_URL = "https://api.perplexity.ai"
