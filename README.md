@@ -11,6 +11,7 @@ Aplikacja Streamlit do przetwarzania pliku wejściowego (`row_no`, `number`, `sp
 - zakres obróbki po `row_no` (od/do),
 - możliwość wgrania gotowego `decoded_nsn_parts.csv` (bez ponownej analizy NSN),
 - możliwość pobrania aktualnego pliku `decoded_nsn_parts.csv` lub szablonu tego formatu,
+- tryb testowy: zapis `prompt1_output.csv` i osobne uruchamianie prompt2 na wybranym zakresie wierszy,
 - stały numer `row_no` w każdym rekordzie wynikowym,
 - ustawiany w UI model Perplexity (program go nie nadpisuje),
 - domyślny model ustawiony na ChatGPT (`openai/gpt-5.2`) + lista pozostałych modeli w menu,

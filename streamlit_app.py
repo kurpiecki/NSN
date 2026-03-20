@@ -7,7 +7,15 @@ import streamlit as st
 
 from app import build_local_index
 from nsn_lookup import NsnLookupService
-from offer_pipeline import FxRates, archive_and_clean, build_decode_table, load_prompt, run_perplexity_pipeline
+from offer_pipeline import (
+    FxRates,
+    archive_and_clean,
+    build_decode_table,
+    load_prompt,
+    run_perplexity_pipeline,
+    run_prompt1_stage,
+    run_prompt2_stage,
+)
 from perplexity_client import PerplexityAPIError, PerplexityClient
 
 st.set_page_config(page_title="NSN + Perplexity Pipeline", layout="wide")
@@ -18,6 +26,8 @@ work_dir.mkdir(parents=True, exist_ok=True)
 input_path = work_dir / "input.csv"
 decode_path = work_dir / "decoded_nsn_parts.csv"
 output_path = work_dir / "output.csv"
+prompt1_output_path = work_dir / "prompt1_output.csv"
+prompt2_test_output_path = work_dir / "prompt2_test_output.csv"
 log_path = work_dir / "api_log.csv"
 archive_dir = work_dir / "archive"
 
@@ -159,8 +169,9 @@ if decode_path.exists():
     if "api_logs" not in st.session_state:
         st.session_state.api_logs = []
 
+    st.markdown("### 3) Tryb pełny (prompt1 -> prompt2)")
     c_run, c_pause, c_stop = st.columns(3)
-    run_clicked = c_run.button("3) Start / Wznów Perplexity")
+    run_clicked = c_run.button("Start / Wznów Perplexity")
     if c_pause.button("Pauza"):
         st.session_state.api_paused = True
         st.info("Pipeline zapauzowany. Kliknij Start / Wznów, aby kontynuować.")
@@ -230,11 +241,97 @@ if decode_path.exists():
             full_logs_df.to_csv(log_path, index=False)
             st.dataframe(full_out_df.head(100), use_container_width=True)
 
+    st.markdown("### 4) Tryb testowy prompt2 (na wynikach prompt1)")
+    c_p1, c_p2 = st.columns(2)
+    with c_p1:
+        if st.button("4a) Zbuduj prompt1_output.csv"):
+            try:
+                client = PerplexityClient(timeout_s=int(api_timeout_s))
+            except PerplexityAPIError as exc:
+                st.error(str(exc))
+            else:
+                p1_df, p1_logs = run_prompt1_stage(
+                    decoded_df,
+                    client=client,
+                    model=selected_model,
+                    prompt1=prompt1,
+                    max_steps=max_steps,
+                    max_output_tokens=max_output_tokens,
+                )
+                p1_df.to_csv(prompt1_output_path, index=False)
+                pd.DataFrame(p1_logs).to_csv(log_path, index=False)
+                st.success(f"Zapisano: {prompt1_output_path}")
+                st.dataframe(p1_df.head(100), use_container_width=True)
+
+    with c_p2:
+        uploaded_prompt1 = st.file_uploader("Wgraj prompt1_output.csv", type=["csv"], key="prompt1_uploader")
+        if uploaded_prompt1 is not None:
+            uploaded_p1_df = pd.read_csv(uploaded_prompt1)
+            uploaded_p1_df.to_csv(prompt1_output_path, index=False)
+            st.success(f"Wgrano: {prompt1_output_path}")
+
+    if prompt1_output_path.exists():
+        p1_df = pd.read_csv(prompt1_output_path)
+        st.caption(f"Wiersze dostępne do prompt2: {len(p1_df)}")
+        r1, r2, r3 = st.columns(3)
+        with r1:
+            p2_from = st.number_input("Prompt2 od wiersza", min_value=1, max_value=max(len(p1_df), 1), value=1)
+        with r2:
+            p2_to = st.number_input("Prompt2 do wiersza", min_value=1, max_value=max(len(p1_df), 1), value=max(len(p1_df), 1))
+        with r3:
+            p2_batch = st.number_input("Prompt2 ile wierszy naraz", min_value=1, max_value=500, value=10)
+
+        if st.button("4b) Uruchom prompt2 na wybranym zakresie"):
+            try:
+                client = PerplexityClient(timeout_s=int(api_timeout_s))
+            except PerplexityAPIError as exc:
+                st.error(str(exc))
+            else:
+                scoped_p1_df = p1_df.iloc[int(p2_from) - 1 : int(p2_to)]
+                progress = st.progress(0.0)
+                info = st.empty()
+                live_log_box = st.empty()
+
+                def on_progress(current: int, total: int, row_no: int) -> None:
+                    progress.progress(current / max(total, 1))
+                    info.info(f"Prompt2: row_no={row_no} ({current}/{total})")
+
+                def on_log(item: dict[str, str]) -> None:
+                    live_log_box.code(
+                        f"[{item.get('stage')}] row_no={item.get('row_no')}\n"
+                        f"REQUEST:\n{item.get('request', '')[:700]}\n\n"
+                        f"RESPONSE:\n{item.get('response', '')[:700]}"
+                    )
+
+                out_df, p2_logs = run_prompt2_stage(
+                    scoped_p1_df,
+                    client=client,
+                    model=selected_model,
+                    prompt2=prompt2,
+                    max_steps=max_steps,
+                    max_output_tokens=max_output_tokens,
+                    fx_rates=FxRates(eur_pln=eur_pln, usd_pln=usd_pln, gbp_pln=gbp_pln),
+                    progress_cb=on_progress,
+                    log_cb=on_log,
+                    start_index=0,
+                    row_limit=int(p2_batch),
+                )
+                out_df.to_csv(prompt2_test_output_path, index=False)
+                pd.DataFrame(p2_logs).to_csv(log_path, index=False)
+                st.success(f"Zapisano testowy wynik prompt2: {prompt2_test_output_path}")
+                st.dataframe(out_df.head(100), use_container_width=True)
+
 if output_path.exists():
     st.subheader("3) Wynik output.csv")
     out_df = pd.read_csv(output_path)
     st.dataframe(out_df, use_container_width=True)
     st.download_button("Pobierz output.csv", output_path.read_bytes(), file_name="output.csv")
+
+if prompt2_test_output_path.exists():
+    st.subheader("Wynik testowy prompt2")
+    p2_out_df = pd.read_csv(prompt2_test_output_path)
+    st.dataframe(p2_out_df, use_container_width=True)
+    st.download_button("Pobierz prompt2_test_output.csv", prompt2_test_output_path.read_bytes(), file_name="prompt2_test_output.csv")
 
 if log_path.exists():
     st.subheader("Log request/response API")
