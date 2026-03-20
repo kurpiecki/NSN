@@ -145,22 +145,48 @@ def run_perplexity_pipeline(
     max_output_tokens: int,
     fx_rates: FxRates,
     progress_cb: callable | None = None,
+    log_cb: callable | None = None,
+    start_index: int = 0,
+    row_limit: int | None = None,
 ) -> tuple[pd.DataFrame, list[dict[str, str]]]:
     offer_rows: list[dict[str, Any]] = []
     logs: list[dict[str, str]] = []
 
     active_df = decode_df[decode_df["nsn"] != "BRAK"].copy()
-    for idx, (_, row) in enumerate(active_df.iterrows(), start=1):
-        row_no = int(row["row_no"])
-        if progress_cb:
-            progress_cb(idx, len(active_df), row_no)
+    grouped_rows: list[tuple[int, pd.DataFrame]] = []
+    for row_no, group in active_df.groupby("row_no", sort=True):
+        grouped_rows.append((int(row_no), group.reset_index(drop=True)))
 
-        spec = str(row.get("input_specification", ""))
+    if start_index < 0:
+        start_index = 0
+    if start_index >= len(grouped_rows):
+        return pd.DataFrame(columns=FINAL_COLUMNS), []
+    if row_limit is None:
+        scoped_groups = grouped_rows[start_index:]
+    else:
+        scoped_groups = grouped_rows[start_index : start_index + max(row_limit, 0)]
+
+    for idx, (row_no, group) in enumerate(scoped_groups, start=1):
+        if progress_cb:
+            progress_cb(idx, len(scoped_groups), row_no)
+
+        first_row = group.iloc[0]
+        spec = str(first_row.get("input_specification", ""))
+        nsn = str(first_row.get("nsn", ""))
+        grouped_parts: list[dict[str, str]] = []
+        for _, part_row in group.iterrows():
+            grouped_parts.append(
+                {
+                    "part_number": str(part_row.get("part_number", "")),
+                    "manufacturer_name": str(part_row.get("manufacturer_name", "")),
+                    "supplier_country": str(part_row.get("supplier_country", "")),
+                    "cage_code": str(part_row.get("cage_code", "")),
+                }
+            )
+
         context = (
-            f"row_no={row_no}\nNSN={row.get('nsn', '')}\n"
-            f"part_number={row.get('part_number', '')}\nmanufacturer={row.get('manufacturer_name', '')}\n"
-            f"supplier_country={row.get('supplier_country', '')}\ncage_code={row.get('cage_code', '')}\n"
-            f"specification={spec}"
+            f"row_no={row_no}\nNSN={nsn}\nspecification={spec}\n"
+            f"candidate_parts_for_row_no={json.dumps(grouped_parts, ensure_ascii=False)}"
         )
         first_input = f"{prompt1}\n\n{context}".strip()
         first_text = client.create_response_text(
@@ -170,15 +196,18 @@ def run_perplexity_pipeline(
             max_output_tokens=max_output_tokens,
             tools=[{"type": "web_search"}],
         )
-        logs.append({"stage": "prompt1", "row_no": str(row_no), "request": first_input[:3000], "response": first_text[:3000]})
+        prompt1_log = {"stage": "prompt1", "row_no": str(row_no), "request": first_input[:3000], "response": first_text[:3000]}
+        logs.append(prompt1_log)
+        if log_cb:
+            log_cb(prompt1_log)
         first_rows = parse_json_rows(first_text)
 
         for item in first_rows:
             normalized = {k: item.get(k, "") for k in FIRST_STAGE_COLUMNS}
             normalized["row_no"] = row_no
-            normalized["part_number"] = normalized["part_number"] or row.get("part_number", "")
-            normalized["cage_code"] = normalized["cage_code"] or row.get("cage_code", "")
-            normalized["nsn"] = normalized["nsn"] or row.get("nsn", "")
+            normalized["part_number"] = normalized["part_number"] or str(first_row.get("part_number", ""))
+            normalized["cage_code"] = normalized["cage_code"] or str(first_row.get("cage_code", ""))
+            normalized["nsn"] = normalized["nsn"] or nsn
 
             second_input = f"{prompt2}\n\n{json.dumps(normalized, ensure_ascii=False)}"
             second_text = client.create_response_text(
@@ -188,7 +217,10 @@ def run_perplexity_pipeline(
                 max_output_tokens=max_output_tokens,
                 tools=[{"type": "web_search"}],
             )
-            logs.append({"stage": "prompt2", "row_no": str(row_no), "request": second_input[:3000], "response": second_text[:3000]})
+            prompt2_log = {"stage": "prompt2", "row_no": str(row_no), "request": second_input[:3000], "response": second_text[:3000]}
+            logs.append(prompt2_log)
+            if log_cb:
+                log_cb(prompt2_log)
             second_rows = parse_json_rows(second_text)
             if not second_rows:
                 second_rows = [normalized]

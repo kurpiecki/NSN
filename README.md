@@ -11,7 +11,11 @@ Aplikacja Streamlit do przetwarzania pliku wejściowego (`row_no`, `number`, `sp
 - zakres obróbki po `row_no` (od/do),
 - stały numer `row_no` w każdym rekordzie wynikowym,
 - ustawiany w UI model Perplexity (program go nie nadpisuje),
+- domyślny model ustawiony na `chatgpt` + lista pozostałych modeli w menu,
 - ustawienia `MAX OUTPUT TOKENS` (1-1200) i `MAX STEPS` (1-10),
+- kontrola paczek wysyłanych do API (ile wierszy w jednym uruchomieniu),
+- do promptu trafia jeden rekord `row_no` naraz wraz z pełną listą kandydatów PN/producent dla tego samego `row_no`,
+- przyciski sterujące przebiegiem: Start/Wznów, Pauza, Stop+reset,
 - podgląd request/response API,
 - przeliczanie cen do PLN po kursach z UI (EUR/USD/GBP),
 - Cleaner: archiwizacja i czyszczenie plików roboczych.
