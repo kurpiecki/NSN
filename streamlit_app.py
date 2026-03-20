@@ -31,9 +31,33 @@ with st.sidebar:
         st.json(loaded)
 
     st.header("Ustawienia Perplexity")
-    model = st.text_input("Model", value="sonar-pro")
-    max_output_tokens = st.slider("MAX OUTPUT TOKENS", 1, 1200, 600)
-    max_steps = st.slider("MAX STEPS", 1, 10, 4)
+    default_models = {
+        "ChatGPT (OpenAI GPT-5.2)": "openai/gpt-5.2",
+        "ChatGPT mini (OpenAI GPT-5 mini)": "openai/gpt-5-mini",
+        "Sonar": "perplexity/sonar",
+        "Sonar Pro": "perplexity/sonar-pro",
+        "Sonar Deep Research": "perplexity/sonar-deep-research",
+        "R1 1776": "perplexity/r1-1776",
+    }
+    model_label = st.selectbox("Model domyślny (start: ChatGPT)", options=list(default_models.keys()), index=0)
+    model_from_list = default_models[model_label]
+    custom_model = st.text_input("Lub wpisz własny identyfikator modelu", value=model_from_list)
+    selected_model = custom_model.strip() or model_from_list
+
+    if selected_model.lower() == "chatgpt":
+        st.warning("Alias 'chatgpt' jest mapowany na 'openai/gpt-5.2', bo API odrzuca samą nazwę 'chatgpt'.")
+
+    is_chatgpt_family = selected_model.lower().startswith("openai/gpt")
+    if is_chatgpt_family:
+        max_output_tokens = st.slider("MAX OUTPUT TOKENS (ChatGPT)", 1, 1200, 600)
+        max_steps = st.slider("MAX STEPS (ChatGPT)", 1, 10, 4)
+    else:
+        st.info("Wybrany model nie jest ChatGPT — parametry mogą mieć inne limity.")
+        max_output_tokens = st.slider("MAX OUTPUT TOKENS", 1, 1200, 400)
+        max_steps = st.slider("MAX STEPS", 1, 10, 2)
+
+    api_timeout_s = st.number_input("Timeout API (sekundy)", min_value=10, max_value=600, value=90, step=5)
+    batch_size = st.number_input("Ile wierszy wysłać do API w jednym uruchomieniu", min_value=1, max_value=500, value=10, step=1)
     eur_pln = st.number_input("EUR/PLN", value=4.0, step=0.01)
     usd_pln = st.number_input("USD/PLN", value=4.0, step=0.01)
     gbp_pln = st.number_input("GBP/PLN", value=5.0, step=0.01)
@@ -66,6 +90,37 @@ if input_path.exists():
         st.success(f"Zapisano: {decode_path}")
         st.dataframe(decoded.head(50), use_container_width=True)
 
+st.subheader("1b) Wgraj gotowy plik po obróbce NSN")
+uploaded_decoded = st.file_uploader("Wgraj decoded_nsn_parts.csv", type=["csv"], key="decoded_uploader")
+if uploaded_decoded is not None:
+    decoded_uploaded_df = pd.read_csv(uploaded_decoded)
+    decoded_uploaded_df.to_csv(decode_path, index=False)
+    st.success(f"Wgrano i zapisano plik obrobiony: {decode_path}")
+
+if decode_path.exists():
+    st.download_button(
+        "Pobierz aktualny decoded_nsn_parts.csv",
+        decode_path.read_bytes(),
+        file_name="decoded_nsn_parts.csv",
+    )
+else:
+    decoded_template = pd.DataFrame(
+        columns=[
+            "row_no",
+            "input_specification",
+            "nsn",
+            "part_number",
+            "manufacturer_name",
+            "supplier_country",
+            "cage_code",
+        ]
+    )
+    st.download_button(
+        "Pobierz szablon decoded_nsn_parts.csv",
+        decoded_template.to_csv(index=False).encode("utf-8"),
+        file_name="decoded_nsn_parts_template.csv",
+    )
+
 if decode_path.exists():
     st.subheader("2) Dane po dekodowaniu NSN")
     decoded_df = pd.read_csv(decode_path)
@@ -78,34 +133,102 @@ if decode_path.exists():
     st.caption("Podgląd prompt2.csv")
     st.code(prompt2[:2000] or "(pusty prompt2.csv)")
 
-    if st.button("3) Uruchom Perplexity (prompt1 -> prompt2)"):
+    active_groups_total = int(decoded_df.loc[decoded_df["nsn"] != "BRAK", "row_no"].nunique())
+    st.caption(f"Rekordy row_no gotowe do wysłania do API (nsn != BRAK): {active_groups_total}")
+    active_preview_df = decoded_df[decoded_df["nsn"] != "BRAK"].copy()
+    if not active_preview_df.empty:
+        first_row_no = int(active_preview_df.iloc[0]["row_no"])
+        preview_group = active_preview_df[active_preview_df["row_no"] == first_row_no].copy()
+        sample = preview_group.iloc[0]
+        preview_parts = preview_group[["part_number", "manufacturer_name", "supplier_country", "cage_code"]].fillna("").to_dict(orient="records")
+        st.caption("Podgląd przykładowego kontekstu wysyłanego do API")
+        st.code(
+            (
+                f"row_no={int(sample['row_no'])}\nNSN={sample.get('nsn', '')}\n"
+                f"specification={sample.get('input_specification', '')}\n"
+                f"candidate_parts_for_row_no={preview_parts}"
+            )[:2000]
+        )
+
+    if "api_cursor" not in st.session_state:
+        st.session_state.api_cursor = 0
+    if "api_paused" not in st.session_state:
+        st.session_state.api_paused = False
+    if "api_out_rows" not in st.session_state:
+        st.session_state.api_out_rows = []
+    if "api_logs" not in st.session_state:
+        st.session_state.api_logs = []
+
+    c_run, c_pause, c_stop = st.columns(3)
+    run_clicked = c_run.button("3) Start / Wznów Perplexity")
+    if c_pause.button("Pauza"):
+        st.session_state.api_paused = True
+        st.info("Pipeline zapauzowany. Kliknij Start / Wznów, aby kontynuować.")
+    if c_stop.button("Stop + reset"):
+        st.session_state.api_paused = False
+        st.session_state.api_cursor = 0
+        st.session_state.api_out_rows = []
+        st.session_state.api_logs = []
+        st.warning("Pipeline zatrzymany i zresetowany.")
+
+    if run_clicked:
+        st.session_state.api_paused = False
         try:
-            client = PerplexityClient()
+            client = PerplexityClient(timeout_s=int(api_timeout_s))
         except PerplexityAPIError as exc:
             st.error(str(exc))
         else:
             progress = st.progress(0.0)
             info = st.empty()
 
+            live_log_box = st.empty()
+
             def on_progress(current: int, total: int, row_no: int) -> None:
                 progress.progress(current / max(total, 1))
                 info.info(f"Obecnie obrabiany row_no={row_no} ({current}/{total})")
 
+            def on_log(item: dict[str, str]) -> None:
+                live_log_box.code(
+                    f"[{item.get('stage')}] row_no={item.get('row_no')}\n"
+                    f"REQUEST:\n{item.get('request', '')[:700]}\n\n"
+                    f"RESPONSE:\n{item.get('response', '')[:700]}"
+                )
+
             out_df, logs = run_perplexity_pipeline(
                 decoded_df,
                 client=client,
-                model=model,
+                model=selected_model,
                 prompt1=prompt1,
                 prompt2=prompt2,
                 max_steps=max_steps,
                 max_output_tokens=max_output_tokens,
                 fx_rates=FxRates(eur_pln=eur_pln, usd_pln=usd_pln, gbp_pln=gbp_pln),
                 progress_cb=on_progress,
+                log_cb=on_log,
+                start_index=int(st.session_state.api_cursor),
+                row_limit=int(batch_size),
             )
-            out_df.to_csv(output_path, index=False)
-            pd.DataFrame(logs).to_csv(log_path, index=False)
-            st.success(f"Gotowe. Wynik: {output_path}")
-            st.dataframe(out_df.head(100), use_container_width=True)
+            st.session_state.api_out_rows.extend(out_df.to_dict(orient="records"))
+            st.session_state.api_logs.extend(logs)
+            st.session_state.api_cursor += int(batch_size)
+
+            total_active = int(decoded_df.loc[decoded_df["nsn"] != "BRAK", "row_no"].nunique())
+            if st.session_state.api_cursor >= total_active:
+                st.success("Gotowe. Przetworzono wszystkie wybrane wiersze.")
+            else:
+                st.info(
+                    f"Przetworzono paczkę {batch_size} wierszy. "
+                    f"Pozycja: {st.session_state.api_cursor}/{total_active}. "
+                    "Kliknij Start / Wznów dla kolejnej paczki."
+                )
+
+            full_out_df = pd.DataFrame(st.session_state.api_out_rows)
+            if full_out_df.empty:
+                full_out_df = out_df
+            full_logs_df = pd.DataFrame(st.session_state.api_logs)
+            full_out_df.to_csv(output_path, index=False)
+            full_logs_df.to_csv(log_path, index=False)
+            st.dataframe(full_out_df.head(100), use_container_width=True)
 
 if output_path.exists():
     st.subheader("3) Wynik output.csv")

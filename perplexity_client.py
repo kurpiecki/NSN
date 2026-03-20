@@ -32,6 +32,19 @@ class PerplexityClient:
         if not self.api_key or "WSTAW" in self.api_key:
             raise PerplexityAPIError("Brak PERPLEXITY_API_KEY w pliku secrets.py")
 
+    @staticmethod
+    def normalize_model_id(model: str) -> str:
+        raw = (model or "").strip()
+        lowered = raw.lower()
+        aliases = {
+            "chatgpt": "openai/gpt-5.2",
+            "gpt": "openai/gpt-5.2",
+            "sonar": "perplexity/sonar",
+            "sonar-pro": "perplexity/sonar-pro",
+            "sonar-deep-research": "perplexity/sonar-deep-research",
+        }
+        return aliases.get(lowered, raw)
+
     def create_response_text(
         self,
         *,
@@ -43,8 +56,9 @@ class PerplexityClient:
         max_output_tokens: int | None = None,
         response_format: dict[str, Any] | None = None,
     ) -> str:
+        resolved_model = self.normalize_model_id(model)
         payload: dict[str, Any] = {
-            "model": model,
+            "model": resolved_model,
             "input": input_text,
             "language_preference": self.language_preference,
         }
@@ -89,6 +103,10 @@ class PerplexityClient:
                 if response.status_code >= 400:
                     raise PerplexityAPIError(f"HTTP {response.status_code}: {response.text}")
                 return response.json()
+            except requests.Timeout as exc:
+                raise PerplexityAPIError(
+                    f"Przekroczono timeout {self.timeout_s}s dla wywołania API; przerwano bez ponawiania."
+                ) from exc
             except (requests.RequestException, ValueError) as exc:
                 last_err = exc
                 time.sleep(min(10, 1.5**attempt))
