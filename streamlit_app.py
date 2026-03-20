@@ -31,18 +31,23 @@ with st.sidebar:
         st.json(loaded)
 
     st.header("Ustawienia Perplexity")
-    default_models = [
-        "chatgpt",
-        "sonar",
-        "sonar-pro",
-        "sonar-deep-research",
-        "r1-1776",
-    ]
-    model = st.selectbox("Model domyślny (start: ChatGPT)", options=default_models, index=0)
-    custom_model = st.text_input("Lub wpisz własny identyfikator modelu", value=model)
-    selected_model = custom_model.strip() or model
+    default_models = {
+        "ChatGPT (OpenAI GPT-5.2)": "openai/gpt-5.2",
+        "ChatGPT mini (OpenAI GPT-5 mini)": "openai/gpt-5-mini",
+        "Sonar": "perplexity/sonar",
+        "Sonar Pro": "perplexity/sonar-pro",
+        "Sonar Deep Research": "perplexity/sonar-deep-research",
+        "R1 1776": "perplexity/r1-1776",
+    }
+    model_label = st.selectbox("Model domyślny (start: ChatGPT)", options=list(default_models.keys()), index=0)
+    model_from_list = default_models[model_label]
+    custom_model = st.text_input("Lub wpisz własny identyfikator modelu", value=model_from_list)
+    selected_model = custom_model.strip() or model_from_list
 
-    is_chatgpt_family = selected_model.lower().startswith("chatgpt")
+    if selected_model.lower() == "chatgpt":
+        st.warning("Alias 'chatgpt' jest mapowany na 'openai/gpt-5.2', bo API odrzuca samą nazwę 'chatgpt'.")
+
+    is_chatgpt_family = selected_model.lower().startswith("openai/gpt")
     if is_chatgpt_family:
         max_output_tokens = st.slider("MAX OUTPUT TOKENS (ChatGPT)", 1, 1200, 600)
         max_steps = st.slider("MAX STEPS (ChatGPT)", 1, 10, 4)
@@ -51,6 +56,7 @@ with st.sidebar:
         max_output_tokens = st.slider("MAX OUTPUT TOKENS", 1, 1200, 400)
         max_steps = st.slider("MAX STEPS", 1, 10, 2)
 
+    api_timeout_s = st.number_input("Timeout API (sekundy)", min_value=10, max_value=600, value=90, step=5)
     batch_size = st.number_input("Ile wierszy wysłać do API w jednym uruchomieniu", min_value=1, max_value=500, value=10, step=1)
     eur_pln = st.number_input("EUR/PLN", value=4.0, step=0.01)
     usd_pln = st.number_input("USD/PLN", value=4.0, step=0.01)
@@ -168,7 +174,7 @@ if decode_path.exists():
     if run_clicked:
         st.session_state.api_paused = False
         try:
-            client = PerplexityClient()
+            client = PerplexityClient(timeout_s=int(api_timeout_s))
         except PerplexityAPIError as exc:
             st.error(str(exc))
         else:
