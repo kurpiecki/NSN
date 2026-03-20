@@ -84,6 +84,37 @@ if input_path.exists():
         st.success(f"Zapisano: {decode_path}")
         st.dataframe(decoded.head(50), use_container_width=True)
 
+st.subheader("1b) Wgraj gotowy plik po obróbce NSN")
+uploaded_decoded = st.file_uploader("Wgraj decoded_nsn_parts.csv", type=["csv"], key="decoded_uploader")
+if uploaded_decoded is not None:
+    decoded_uploaded_df = pd.read_csv(uploaded_decoded)
+    decoded_uploaded_df.to_csv(decode_path, index=False)
+    st.success(f"Wgrano i zapisano plik obrobiony: {decode_path}")
+
+if decode_path.exists():
+    st.download_button(
+        "Pobierz aktualny decoded_nsn_parts.csv",
+        decode_path.read_bytes(),
+        file_name="decoded_nsn_parts.csv",
+    )
+else:
+    decoded_template = pd.DataFrame(
+        columns=[
+            "row_no",
+            "input_specification",
+            "nsn",
+            "part_number",
+            "manufacturer_name",
+            "supplier_country",
+            "cage_code",
+        ]
+    )
+    st.download_button(
+        "Pobierz szablon decoded_nsn_parts.csv",
+        decoded_template.to_csv(index=False).encode("utf-8"),
+        file_name="decoded_nsn_parts_template.csv",
+    )
+
 if decode_path.exists():
     st.subheader("2) Dane po dekodowaniu NSN")
     decoded_df = pd.read_csv(decode_path)

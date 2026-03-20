@@ -9,6 +9,8 @@ Aplikacja Streamlit do przetwarzania pliku wejściowego (`row_no`, `number`, `sp
 
 ## Kluczowe funkcje
 - zakres obróbki po `row_no` (od/do),
+- możliwość wgrania gotowego `decoded_nsn_parts.csv` (bez ponownej analizy NSN),
+- możliwość pobrania aktualnego pliku `decoded_nsn_parts.csv` lub szablonu tego formatu,
 - stały numer `row_no` w każdym rekordzie wynikowym,
 - ustawiany w UI model Perplexity (program go nie nadpisuje),
 - domyślny model ustawiony na `chatgpt` + lista pozostałych modeli w menu,
