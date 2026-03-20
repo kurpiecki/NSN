@@ -69,14 +69,29 @@ def load_prompt(path: str | Path) -> str:
 
 
 def parse_json_rows(api_text: str) -> list[dict[str, Any]]:
-    stripped = api_text.strip()
+    stripped = (api_text or "").strip()
     if not stripped:
         return []
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
+        stripped = re.sub(r"\s*```$", "", stripped)
     parsed: Any
     try:
         parsed = json.loads(stripped)
     except json.JSONDecodeError:
-        return []
+        parsed = None
+        for opener, closer in [("[", "]"), ("{", "}")]:
+            start = stripped.find(opener)
+            end = stripped.rfind(closer)
+            if start != -1 and end != -1 and end > start:
+                candidate = stripped[start : end + 1]
+                try:
+                    parsed = json.loads(candidate)
+                    break
+                except json.JSONDecodeError:
+                    continue
+        if parsed is None:
+            return []
     if isinstance(parsed, dict):
         return [parsed]
     if isinstance(parsed, list):
@@ -242,7 +257,9 @@ def run_prompt1_stage(
         first_rows = parse_json_rows(first_text)
 
         for item in first_rows:
-            normalized = {k: item.get(k, "") for k in FIRST_STAGE_COLUMNS}
+            normalized = {str(k): v for k, v in item.items()}
+            for key in FIRST_STAGE_COLUMNS:
+                normalized.setdefault(key, "")
             normalized["row_no"] = row_no
             normalized["part_number"] = normalized["part_number"] or str(first_row.get("part_number", ""))
             normalized["cage_code"] = normalized["cage_code"] or str(first_row.get("cage_code", ""))
@@ -253,7 +270,9 @@ def run_prompt1_stage(
     if stage_df.empty:
         stage_df = pd.DataFrame(columns=FIRST_STAGE_COLUMNS)
     else:
-        stage_df = stage_df.reindex(columns=FIRST_STAGE_COLUMNS)
+        for key in FIRST_STAGE_COLUMNS:
+            if key not in stage_df.columns:
+                stage_df[key] = ""
     return stage_df, logs
 
 
@@ -286,7 +305,9 @@ def run_prompt2_stage(
         row_no = int(row.get("row_no", 0))
         if progress_cb:
             progress_cb(idx, len(scoped_df), row_no)
-        normalized = {k: row.get(k, "") for k in FIRST_STAGE_COLUMNS}
+        normalized = row.to_dict()
+        for key in FIRST_STAGE_COLUMNS:
+            normalized.setdefault(key, "")
         second_input = f"{prompt2}\n\n{json.dumps(normalized, ensure_ascii=False)}"
         second_text = client.create_response_text(
             model=model,

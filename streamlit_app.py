@@ -280,6 +280,8 @@ if decode_path.exists():
             p2_to = st.number_input("Prompt2 do wiersza", min_value=1, max_value=max(len(p1_df), 1), value=max(len(p1_df), 1))
         with r3:
             p2_batch = st.number_input("Prompt2 ile wierszy naraz", min_value=1, max_value=500, value=10)
+        planned = min(int(p2_batch), max(0, int(p2_to) - int(p2_from) + 1))
+        st.caption(f"Do prompt2 w tym uruchomieniu pójdzie: {planned} wierszy.")
 
         if st.button("4b) Uruchom prompt2 na wybranym zakresie"):
             try:
@@ -317,6 +319,12 @@ if decode_path.exists():
                     row_limit=int(p2_batch),
                 )
                 out_df.to_csv(prompt2_test_output_path, index=False)
+                if output_path.exists():
+                    existing_out_df = pd.read_csv(output_path)
+                    merged_out_df = pd.concat([existing_out_df, out_df], ignore_index=True)
+                else:
+                    merged_out_df = out_df.copy()
+                merged_out_df.to_csv(output_path, index=False)
                 pd.DataFrame(p2_logs).to_csv(log_path, index=False)
                 st.success(f"Zapisano testowy wynik prompt2: {prompt2_test_output_path}")
                 st.dataframe(out_df.head(100), use_container_width=True)
