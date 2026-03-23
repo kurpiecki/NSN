@@ -175,7 +175,7 @@ def test_characteristics_missing_table_does_not_break_lookup(tmp_path: Path) -> 
     result = service.lookup_nsn("4935000000012")
 
     assert result["characteristics"]["rows"] == []
-    assert "folder CHARACTERISTICS niedostępny" in result["warnings"]
+    assert any("Brak załadowanych tabel CHARACTERISTICS w bazie indeksu" in w for w in result["warnings"])
 
 
 def test_infoproduct_lookup_by_nsn_returns_shared_scope(tmp_path: Path) -> None:
