@@ -293,7 +293,7 @@ class NsnLookupService:
     def get_characteristics_rows(self, niin: str, *, ctx: QueryContext) -> tuple[list[dict[str, Any]], list[str]]:
         warnings: list[str] = []
         if not self._characteristics_loader_initialized:
-            warning = "Brak załadowanych tabel CHARACTERISTICS w bazie indeksu (np. characteristics__*). Sprawdź format pliku (CSV/TXT) i uruchom build_local_index --rebuild."
+            warning = "Brak załadowanych tabel CHARACTERISTICS w bazie indeksu (np. characteristics__*). Sprawdź format pliku (CSV/TXT) i uruchom: python app.py build-index --base-dir <katalog_z_danymi> --db-path <sciezka_do_nsn.duckdb> --rebuild"
             warnings.append(warning)
             self._trace(ctx, f"characteristics loader unavailable: {warning}")
             self._trace(ctx, f"characteristics_rows_found for NIIN={niin}: 0")

@@ -43,9 +43,24 @@ with st.sidebar:
     base_dir = st.text_input("Katalog źródłowy NSN", value=".")
     db_path = st.text_input("Baza DuckDB", value="data/nsn.duckdb")
     if st.button("Zbuduj / odśwież indeks NSN"):
+        resolved_base_dir = Path(base_dir).expanduser().resolve()
+        resolved_db_path = Path(db_path).expanduser().resolve()
         loaded = build_local_index(base_dir=base_dir, db_path=db_path, rebuild=True)
         st.success("Indeks gotowy")
+        st.caption(f"Użyty katalog źródłowy: `{resolved_base_dir}`")
+        st.caption(f"Użyta baza DuckDB: `{resolved_db_path}`")
         st.json(loaded)
+
+        if loaded.get("CHARACTERISTICS", 0) == 0:
+            st.warning(
+                "Wczytano 0 rekordów z CHARACTERISTICS. "
+                "Sprawdź, czy wybrany `Katalog źródłowy NSN` zawiera folder `CHARACTERISTICS` "
+                "z plikami `.csv` lub `.txt`."
+            )
+            st.code(
+                f'python app.py build-index --base-dir "{resolved_base_dir}" --db-path "{resolved_db_path}" --rebuild',
+                language="bash",
+            )
 
     st.header("Ustawienia Perplexity")
     default_models = {
