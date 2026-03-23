@@ -21,6 +21,9 @@ from perplexity_client import PerplexityAPIError, PerplexityClient
 st.set_page_config(page_title="NSN + Perplexity Pipeline", layout="wide")
 st.title("NSN → PN → Perplexity Pipeline")
 
+if "show_infoproduct" not in st.session_state:
+    st.session_state.show_infoproduct = False
+
 work_dir = Path("workspace_data")
 work_dir.mkdir(parents=True, exist_ok=True)
 input_path = work_dir / "input.csv"
@@ -32,6 +35,10 @@ log_path = work_dir / "api_log.csv"
 archive_dir = work_dir / "archive"
 
 with st.sidebar:
+    st.header("Narzędzia")
+    if st.button("InfoProduct", use_container_width=True):
+        st.session_state.show_infoproduct = not st.session_state.show_infoproduct
+
     st.header("Konfiguracja danych")
     base_dir = st.text_input("Katalog źródłowy NSN", value=".")
     db_path = st.text_input("Baza DuckDB", value="data/nsn.duckdb")
@@ -71,6 +78,83 @@ with st.sidebar:
     eur_pln = st.number_input("EUR/PLN", value=4.0, step=0.01)
     usd_pln = st.number_input("USD/PLN", value=4.0, step=0.01)
     gbp_pln = st.number_input("GBP/PLN", value=5.0, step=0.01)
+
+if st.session_state.show_infoproduct:
+    st.subheader("InfoProduct")
+    st.caption("Enter NSN or Part Number")
+    info_query = st.text_input("Enter NSN or Part Number", key="infoproduct_query")
+    c_search, c_close = st.columns([1, 1])
+    search_clicked = c_search.button("Search", key="infoproduct_search")
+    if c_close.button("Close", key="infoproduct_close"):
+        st.session_state.show_infoproduct = False
+        st.rerun()
+
+    if search_clicked:
+        try:
+            info_service = NsnLookupService(db_path=db_path)
+            info_result = info_service.lookup_infoproduct(info_query)
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"InfoProduct error: {exc}")
+        else:
+            for warning in info_result.get("warnings", []):
+                st.warning(warning)
+
+            for idx, match in enumerate(info_result.get("matches", []), start=1):
+                st.markdown(f"### Match {idx}")
+
+                st.markdown("#### Product Info Summary")
+                shared_info = match.get("shared_product_info", {})
+                summary_row = {
+                    "NSN": match.get("nsn", ""),
+                    "NIIN": match.get("niin", ""),
+                    "part_numbers_count": len(match.get("part_numbers", [])),
+                    "physical_form": shared_info.get("physical_form_raw", ""),
+                    "quantity_within_each_unit_package": shared_info.get("quantity_within_each_unit_package_raw", ""),
+                    "quantity_value": shared_info.get("quantity_value", ""),
+                    "quantity_unit": shared_info.get("quantity_unit", ""),
+                    "unit_of_issue": shared_info.get("ui", ""),
+                    "container": shared_info.get("unit_container", ""),
+                    "weight": shared_info.get("unit_pack_weight", "") or shared_info.get("unpackaged_item_weight", ""),
+                    "dimensions": shared_info.get("unit_pack_dimensions", "") or shared_info.get("unpackaged_item_dimensions", ""),
+                    "cube": shared_info.get("unit_pack_cube", "") or shared_info.get("dss_cube", ""),
+                }
+                st.dataframe(pd.DataFrame([summary_row]), use_container_width=True)
+
+                st.markdown("#### Part Numbers")
+                part_numbers = match.get("part_numbers", [])
+                if part_numbers:
+                    st.dataframe(pd.DataFrame(part_numbers), use_container_width=True)
+                else:
+                    st.info("Brak part numbers.")
+
+                st.markdown("#### Detailed Product / Packaging Info")
+                for part_info in match.get("part_specific_info", []):
+                    pn = part_info.get("part_number", "") or "(brak)"
+                    st.markdown(f"**Part Number:** {pn}")
+                    st.write(f"Manufacturer: {part_info.get('manufacturer_name', '')}")
+                    info_scope = part_info.get("info_scope", "shared_nsn_level")
+                    if info_scope == "shared_nsn_level":
+                        st.caption("shared NSN-level product info")
+                    st.json(part_info.get("product_info", {}))
+
+                st.markdown("#### Raw Characteristics")
+                characteristics_rows = match.get("characteristics_rows", [])
+                if characteristics_rows:
+                    char_df = pd.DataFrame(characteristics_rows)
+                    char_cols = [c for c in ["mrc", "requirements_statement", "clear_text_reply"] if c in char_df.columns]
+                    st.dataframe(char_df[char_cols] if char_cols else char_df, use_container_width=True)
+                else:
+                    st.info("Brak characteristics rows.")
+
+                st.markdown("#### Packaging Profiles")
+                packaging_rows = match.get("packaging_profiles", [])
+                if packaging_rows:
+                    st.dataframe(pd.DataFrame(packaging_rows), use_container_width=True)
+                else:
+                    st.info("Brak packaging profiles.")
+
+            st.markdown("#### Debug")
+            st.json(info_result.get("debug", {}))
 
 st.subheader("1) Plik wejściowy")
 uploaded = st.file_uploader("Wgraj input CSV", type=["csv"])

@@ -405,6 +405,119 @@ class NsnLookupService:
         return summary
 
     @staticmethod
+    def _normalize_free_text(value: str) -> str:
+        return re.sub(r"[^A-Z0-9]", "", str(value).upper())
+
+    @staticmethod
+    def _format_nsn_from_parts(fsc: str | None, niin: str) -> str | None:
+        clean_fsc = re.sub(r"\D", "", str(fsc or ""))
+        clean_niin = re.sub(r"\D", "", str(niin or ""))
+        if len(clean_fsc) == 4 and len(clean_niin) == 9:
+            return f"{clean_fsc}-{clean_niin[0:2]}-{clean_niin[2:5]}-{clean_niin[5:9]}"
+        return None
+
+    def _extract_niin_and_fsc_from_identification(
+        self,
+        identification: dict[str, Any] | None,
+        fallback_niin: str,
+        fallback_fsc: str | None,
+    ) -> tuple[str, str | None]:
+        if not identification:
+            return fallback_niin, fallback_fsc
+        niin_col = self._pick_column_from_names(list(identification.keys()), ["NIIN"])
+        fsc_col = self._pick_column_from_names(list(identification.keys()), ["FSC"])
+        nii = str(identification.get(niin_col or "", "")).strip() if niin_col else ""
+        fsc = str(identification.get(fsc_col or "", "")).strip() if fsc_col else ""
+        return (nii or fallback_niin, fsc or fallback_fsc)
+
+    def _query_reference_rows_by_part_number(self, *, part_number: str, ctx: QueryContext) -> list[dict[str, Any]]:
+        tbl = self._find_table(["REFERENCE__V_FLIS_PART"], ctx=ctx)
+        if not tbl:
+            return []
+        cols = self._columns(tbl)
+        pn_col = self._pick_column_from_names(cols, ["PART_NUMBER", "PARTNO", "PN"])
+        if not pn_col:
+            self._trace(ctx, f"skip table={tbl}: PART_NUMBER column missing")
+            return []
+
+        raw = part_number.strip()
+        normalized = self._normalize_free_text(raw)
+        if not raw:
+            return []
+
+        sql = (
+            f'SELECT * FROM "{tbl}" '
+            f'WHERE UPPER(TRIM(COALESCE("{pn_col}", \'\'))) = ? '
+            f'OR REGEXP_REPLACE(UPPER(COALESCE("{pn_col}", \'\')), \'[^A-Z0-9]\', \'\', \'g\') = ?'
+        )
+        df = self._con.execute(sql, [raw.upper(), normalized]).fetchdf()
+        self._trace(ctx, f"reference rows matched by part_number={len(df)}")
+        if df.empty:
+            return []
+        df.insert(0, "table_name", tbl)
+        return df.fillna("").to_dict(orient="records")
+
+    def _pick_first_non_empty(self, rows: list[dict[str, Any]], candidates: list[str]) -> Any:
+        for row in rows:
+            col = self._pick_column_from_names(list(row.keys()), candidates)
+            if not col:
+                continue
+            value = row.get(col)
+            if str(value).strip():
+                return value
+        return ""
+
+    def _build_freight_packaging_summary(
+        self,
+        *,
+        characteristics_summary: dict[str, Any],
+        packaging_rows: list[dict[str, Any]],
+        freight_rows: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        unit_container = self._pick_first_non_empty(packaging_rows, ["UNIT_CONTAINER", "UNIT_PACK", "PACKAGE_TYPE"])
+        intermediate_container = self._pick_first_non_empty(
+            packaging_rows, ["INTERMEDIATE_CONTAINER", "INTERMEDIATE_PACK", "PICA_SICA"]
+        )
+        ui = self._pick_first_non_empty(packaging_rows, ["UI", "UNIT_OF_ISSUE"])
+        icq = self._pick_first_non_empty(packaging_rows, ["ICQ", "INTERMEDIATE_CONTAINER_QUANTITY", "PACKAGE_QTY"])
+        unit_pack_weight = self._pick_first_non_empty(
+            packaging_rows, ["UNIT_PACK_WEIGHT", "PACK_WEIGHT", "UNIT_WEIGHT", "WEIGHT"]
+        )
+        unit_pack_dimensions = self._pick_first_non_empty(
+            packaging_rows, ["UNIT_PACK_DIMENSIONS", "DIMENSIONS", "UNIT_DIMENSIONS"]
+        )
+        unit_pack_cube = self._pick_first_non_empty(packaging_rows, ["UNIT_PACK_CUBE", "CUBE"])
+        dss_weight = self._pick_first_non_empty(freight_rows, ["DSS_WEIGHT", "WEIGHT"])
+        dss_cube = self._pick_first_non_empty(freight_rows, ["DSS_CUBE", "CUBE"])
+        unpackaged_item_weight = self._pick_first_non_empty(
+            freight_rows, ["UNPACKAGED_ITEM_WEIGHT", "ITEM_WEIGHT", "NET_WEIGHT"]
+        )
+        unpackaged_item_dimensions = self._pick_first_non_empty(
+            freight_rows, ["UNPACKAGED_ITEM_DIMENSIONS", "ITEM_DIMENSIONS", "DIMENSIONS"]
+        )
+        supplemental_instructions = self._pick_first_non_empty(
+            packaging_rows + freight_rows, ["SUPPLEMENTAL_INSTRUCTIONS", "SPECIAL_HANDLING", "REMARKS"]
+        )
+        return {
+            "physical_form_raw": characteristics_summary.get("physical_form_raw"),
+            "quantity_within_each_unit_package_raw": characteristics_summary.get("quantity_within_each_unit_package_raw"),
+            "quantity_value": characteristics_summary.get("quantity_value"),
+            "quantity_unit": characteristics_summary.get("quantity_unit"),
+            "ui": ui,
+            "icq": icq,
+            "unit_container": unit_container,
+            "intermediate_container": intermediate_container,
+            "unpackaged_item_weight": unpackaged_item_weight,
+            "unpackaged_item_dimensions": unpackaged_item_dimensions,
+            "unit_pack_weight": unit_pack_weight,
+            "unit_pack_dimensions": unit_pack_dimensions,
+            "unit_pack_cube": unit_pack_cube,
+            "dss_weight": dss_weight,
+            "dss_cube": dss_cube,
+            "supplemental_instructions": supplemental_instructions,
+        }
+
+    @staticmethod
     def _pick_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
         if df.empty:
             return None
@@ -560,6 +673,238 @@ class NsnLookupService:
                 },
             },
         )
+
+    def build_infoproduct_result(
+        self,
+        *,
+        ctx: QueryContext,
+        query_type: str,
+        query_raw: str,
+        niin: str,
+        fsc: str | None,
+        identification: dict[str, Any] | None,
+        reference_rows: list[dict[str, Any]],
+        cage_rows: list[dict[str, Any]],
+        characteristics_rows: list[dict[str, Any]],
+        characteristics_summary: dict[str, Any],
+        characteristics_warnings: list[str],
+        packaging_rows: list[dict[str, Any]],
+        freight_rows: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        nsn_value = self._format_nsn_from_parts(fsc, niin)
+        if not nsn_value and identification:
+            ni2, fsc2 = self._extract_niin_and_fsc_from_identification(identification, niin, fsc)
+            nsn_value = self._format_nsn_from_parts(fsc2, ni2)
+        summary = self._build_freight_packaging_summary(
+            characteristics_summary=characteristics_summary,
+            packaging_rows=packaging_rows,
+            freight_rows=freight_rows,
+        )
+        summary["sources"] = {
+            "physical_form_and_quantity": "CHARACTERISTICS",
+            "ui_container_weight_dimensions_cube": "FREIGHT_PACKAGING",
+        }
+
+        ref_df = pd.DataFrame(reference_rows)
+        part_col = self._pick_column(ref_df, ["PART_NUMBER"])
+        cage_col = self._pick_column(ref_df, ["CAGE_CODE", "CAGE"])
+        rncc_col = self._pick_column(ref_df, ["RNCC", "REFERENCE_TYPE"])
+
+        cage_df = pd.DataFrame(cage_rows)
+        cage_code_col = self._pick_column(cage_df, ["CAGE_CODE", "CAGE"])
+        manufacturer_col = self._pick_column(cage_df, ["COMPANY_NAME", "COMPANY", "NAME"])
+        cage_map: dict[str, str] = {}
+        if cage_code_col and manufacturer_col:
+            for _, c_row in cage_df.iterrows():
+                code = str(c_row.get(cage_code_col, "")).strip().upper()
+                if code and str(c_row.get(manufacturer_col, "")).strip():
+                    cage_map[code] = str(c_row.get(manufacturer_col, "")).strip()
+
+        part_numbers: list[dict[str, Any]] = []
+        for _, row in ref_df.iterrows():
+            pn = str(row.get(part_col, "")).strip() if part_col else ""
+            cage_code = str(row.get(cage_col, "")).strip().upper() if cage_col else ""
+            part_numbers.append(
+                {
+                    "part_number": pn,
+                    "cage_code": cage_code,
+                    "manufacturer_name": cage_map.get(cage_code, ""),
+                    "reference_type": str(row.get(rncc_col, "")).strip() if rncc_col else "",
+                    "nsn_level_info_note": "shared NSN-level product info",
+                }
+            )
+
+        part_specific_info = [
+            {
+                "part_number": item["part_number"],
+                "cage_code": item["cage_code"],
+                "manufacturer_name": item["manufacturer_name"],
+                "info_scope": "shared_nsn_level",
+                "product_info": summary,
+            }
+            for item in part_numbers
+        ]
+
+        debug = {
+            "query_type": query_type,
+            "normalized_query": {"fsc": fsc, "niin": niin, "nsn": nsn_value},
+            "found_niin_count": 1,
+            "found_part_number_count": len(part_numbers),
+            "found_characteristics_row_count": len(characteristics_rows),
+            "found_packaging_profile_count": len(packaging_rows),
+            "info_scope_per_part_number": [{"part_number": p["part_number"], "info_scope": p["info_scope"]} for p in part_specific_info],
+        }
+
+        warnings: list[str] = list(characteristics_warnings)
+        if not characteristics_rows:
+            warnings.append("Brak characteristics rows dla NIIN.")
+        if not packaging_rows and not freight_rows:
+            warnings.append("Brak packaging/freight rows dla NIIN.")
+        if not reference_rows:
+            warnings.append("Brak part numbers dla NIIN.")
+
+        return {
+            "query_type": query_type,
+            "query_raw": query_raw,
+            "matches": [
+                {
+                    "nsn": nsn_value or "",
+                    "niin": niin,
+                    "part_numbers": part_numbers,
+                    "shared_product_info": summary,
+                    "part_specific_info": part_specific_info,
+                    "characteristics_rows": characteristics_rows,
+                    "packaging_profiles": packaging_rows,
+                }
+            ],
+            "warnings": warnings,
+            "debug": debug,
+        }
+
+    def lookup_infoproduct(self, query: str) -> dict[str, Any]:
+        raw_query = str(query or "").strip()
+        if not raw_query:
+            raise ValueError("Puste zapytanie InfoProduct.")
+
+        normalized_nsn: dict[str, Any] | None = None
+        query_type = "part_number"
+        try:
+            normalized_nsn = normalize_nsn(raw_query)
+            query_type = "nsn"
+        except ValueError:
+            normalized_nsn = None
+
+        ctx = QueryContext(
+            query_id=str(uuid.uuid4()),
+            raw_input=raw_query,
+            normalized_nsn=normalized_nsn.get("nsn") if normalized_nsn else None,
+            fsc=normalized_nsn.get("fsc") if normalized_nsn else None,
+            niin=normalized_nsn.get("niin") if normalized_nsn else "",
+        )
+        if query_type == "nsn":
+            identification = self.get_identification(ctx=ctx)
+            reference_rows = self.get_reference_rows(ctx=ctx)
+            ref_df = pd.DataFrame(reference_rows)
+            cage_col = self._pick_column(ref_df, ["CAGE_CODE", "CAGE"])
+            cage_codes = set(ref_df[cage_col].astype(str).tolist()) if cage_col else set()
+            cage_rows = self.get_cage_details(ctx=ctx, cage_codes=cage_codes)
+            packaging_rows = self.get_packaging_rows(ctx=ctx)
+            freight_rows = self.get_freight_rows(ctx=ctx)
+            characteristics_rows, characteristics_warnings = self.get_characteristics_rows(ctx.niin, ctx=ctx)
+            characteristics_summary = self.summarize_characteristics(characteristics_rows, ctx=ctx)
+            return self.build_infoproduct_result(
+                ctx=ctx,
+                query_type="nsn",
+                query_raw=raw_query,
+                niin=ctx.niin,
+                fsc=ctx.fsc,
+                identification=identification,
+                reference_rows=reference_rows,
+                cage_rows=cage_rows,
+                characteristics_rows=characteristics_rows,
+                characteristics_summary=characteristics_summary,
+                characteristics_warnings=characteristics_warnings,
+                packaging_rows=packaging_rows,
+                freight_rows=freight_rows,
+            )
+
+        reference_rows_by_pn = self._query_reference_rows_by_part_number(part_number=raw_query, ctx=ctx)
+        ref_df = pd.DataFrame(reference_rows_by_pn)
+        niin_col = self._pick_column(ref_df, ["NIIN"])
+        fsc_col = self._pick_column(ref_df, ["FSC"])
+        matched_pairs: list[tuple[str, str | None]] = []
+        if niin_col:
+            seen: set[tuple[str, str | None]] = set()
+            for _, row in ref_df.iterrows():
+                niin = str(row.get(niin_col, "")).strip()
+                if not niin:
+                    continue
+                fsc_val = str(row.get(fsc_col, "")).strip() if fsc_col else None
+                key = (niin, fsc_val or None)
+                if key not in seen:
+                    seen.add(key)
+                    matched_pairs.append(key)
+
+        matches: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        if not matched_pairs:
+            warnings.append("Nie znaleziono NIIN dla podanego part number.")
+
+        for niin, fsc in matched_pairs:
+            local_ctx = QueryContext(
+                query_id=ctx.query_id,
+                raw_input=ctx.raw_input,
+                normalized_nsn=None,
+                fsc=fsc,
+                niin=niin,
+            )
+            identification = self.get_identification(ctx=local_ctx)
+            ref_rows = self.get_reference_rows(ctx=local_ctx)
+            local_ref_df = pd.DataFrame(ref_rows)
+            cage_col = self._pick_column(local_ref_df, ["CAGE_CODE", "CAGE"])
+            cage_codes = set(local_ref_df[cage_col].astype(str).tolist()) if cage_col else set()
+            cage_rows = self.get_cage_details(ctx=local_ctx, cage_codes=cage_codes)
+            packaging_rows = self.get_packaging_rows(ctx=local_ctx)
+            freight_rows = self.get_freight_rows(ctx=local_ctx)
+            characteristics_rows, characteristics_warnings = self.get_characteristics_rows(niin, ctx=local_ctx)
+            characteristics_summary = self.summarize_characteristics(characteristics_rows, ctx=local_ctx)
+            built = self.build_infoproduct_result(
+                ctx=local_ctx,
+                query_type="part_number",
+                query_raw=raw_query,
+                niin=niin,
+                fsc=fsc,
+                identification=identification,
+                reference_rows=ref_rows,
+                cage_rows=cage_rows,
+                characteristics_rows=characteristics_rows,
+                characteristics_summary=characteristics_summary,
+                characteristics_warnings=characteristics_warnings,
+                packaging_rows=packaging_rows,
+                freight_rows=freight_rows,
+            )
+            matches.extend(built["matches"])
+            warnings.extend(built.get("warnings", []))
+
+        return {
+            "query_type": "part_number",
+            "query_raw": raw_query,
+            "matches": matches,
+            "warnings": sorted({w for w in warnings if w}),
+            "debug": {
+                "query_type": "part_number",
+                "normalized_query": self._normalize_free_text(raw_query),
+                "found_niin_count": len(matched_pairs),
+                "found_part_number_count": len(reference_rows_by_pn),
+                "found_characteristics_row_count": sum(len(m.get("characteristics_rows", [])) for m in matches),
+                "found_packaging_profile_count": sum(len(m.get("packaging_profiles", [])) for m in matches),
+                "info_scope_per_part_number": [
+                    {"part_number": p.get("part_number", ""), "info_scope": p.get("info_scope", "")}
+                    for m in matches
+                    for p in m.get("part_specific_info", [])
+                ],
+            },
+        }
 
     def suggest_known_nsn(self) -> str | None:
         ctx = QueryContext(query_id="sample", raw_input="sample", normalized_nsn=None, fsc=None, niin="")
