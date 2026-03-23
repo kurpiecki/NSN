@@ -176,3 +176,34 @@ def test_characteristics_missing_table_does_not_break_lookup(tmp_path: Path) -> 
 
     assert result["characteristics"]["rows"] == []
     assert "folder CHARACTERISTICS niedostępny" in result["warnings"]
+
+
+def test_infoproduct_lookup_by_nsn_returns_shared_scope(tmp_path: Path) -> None:
+    db_path = tmp_path / "nsn.duckdb"
+    _create_test_db(db_path)
+    service = NsnLookupService(db_path=db_path)
+
+    result = service.lookup_infoproduct("4935000000012")
+
+    assert result["query_type"] == "nsn"
+    assert len(result["matches"]) == 1
+    match = result["matches"][0]
+    assert match["niin"] == "000000012"
+    assert match["shared_product_info"]["physical_form_raw"] == "LIQUID"
+    assert match["shared_product_info"]["quantity_value"] == 4.0
+    assert all(row["info_scope"] == "shared_nsn_level" for row in match["part_specific_info"])
+
+
+def test_infoproduct_lookup_by_part_number_supports_multiple_niin(tmp_path: Path) -> None:
+    db_path = tmp_path / "nsn.duckdb"
+    _create_test_db(db_path)
+    con = duckdb.connect(str(db_path))
+    con.execute("INSERT INTO reference__v_flis_part VALUES ('010445034','PN-1','C002','A','1','','','','','','A')")
+    con.close()
+
+    service = NsnLookupService(db_path=db_path)
+    result = service.lookup_infoproduct("PN-1")
+
+    assert result["query_type"] == "part_number"
+    assert len(result["matches"]) == 2
+    assert {row["niin"] for row in result["matches"]} == {"000000012", "010445034"}
